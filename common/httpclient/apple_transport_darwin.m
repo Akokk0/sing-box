@@ -101,6 +101,7 @@ static box_apple_http_response_t *box_create_response(NSHTTPURLResponse *httpRes
 @property(nonatomic, assign) BOOL anchorOnly;
 @property(nonatomic, strong) NSArray *anchors;
 @property(nonatomic, strong) NSData *pinnedPublicKeyHashes;
+@property(nonatomic, strong) NSData *pinnedCertificateHashes;
 @end
 
 @implementation BoxAppleHTTPSessionDelegate
@@ -127,7 +128,7 @@ didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
 		return;
 	}
 	NSDate *verifyDate = box_apple_http_verify_date_for_request(task.currentRequest ?: task.originalRequest);
-	BOOL needsCustomHandling = self.insecure || self.anchorOnly || self.anchors.count > 0 || self.pinnedPublicKeyHashes.length > 0 || verifyDate != nil;
+	BOOL needsCustomHandling = self.insecure || self.anchorOnly || self.anchors.count > 0 || self.pinnedPublicKeyHashes.length > 0 || self.pinnedCertificateHashes.length > 0 || verifyDate != nil;
 	if (!needsCustomHandling) {
 		completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
 		return;
@@ -152,6 +153,38 @@ didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
 				(uint8_t *)leafData.bytes,
 				leafData.length
 			);
+			if (pinError != NULL) {
+				free(pinError);
+				ok = NO;
+			}
+		}
+		if (certificateChain != NULL) {
+			CFRelease(certificateChain);
+		}
+	}
+	if (ok && self.pinnedCertificateHashes.length > 0) {
+		CFArrayRef certificateChain = SecTrustCopyCertificateChain(trustRef);
+		CFIndex chainCount = certificateChain != NULL ? CFArrayGetCount(certificateChain) : 0;
+		if (chainCount == 0) {
+			ok = NO;
+		} else {
+			NSMutableData *flatChain = [NSMutableData data];
+			size_t *chainLengths = calloc((size_t)chainCount, sizeof(size_t));
+			for (CFIndex index = 0; index < chainCount; index++) {
+				SecCertificateRef certificate = (SecCertificateRef)CFArrayGetValueAtIndex(certificateChain, index);
+				NSData *certificateData = CFBridgingRelease(SecCertificateCopyData(certificate));
+				chainLengths[index] = certificateData.length;
+				[flatChain appendData:certificateData];
+			}
+			char *pinError = box_apple_http_verify_certificate_sha256(
+				(uint8_t *)self.pinnedCertificateHashes.bytes,
+				self.pinnedCertificateHashes.length,
+				(uint8_t *)flatChain.bytes,
+				flatChain.length,
+				chainLengths,
+				(size_t)chainCount
+			);
+			free(chainLengths);
 			if (pinError != NULL) {
 				free(pinError);
 				ok = NO;
@@ -218,6 +251,9 @@ box_apple_http_session_t *box_apple_http_session_create(
 			}
 			if (config->pinned_public_key_sha256 != NULL && config->pinned_public_key_sha256_len > 0) {
 				delegate.pinnedPublicKeyHashes = [NSData dataWithBytes:config->pinned_public_key_sha256 length:config->pinned_public_key_sha256_len];
+			}
+			if (config->pinned_certificate_sha256 != NULL && config->pinned_certificate_sha256_len > 0) {
+				delegate.pinnedCertificateHashes = [NSData dataWithBytes:config->pinned_certificate_sha256 length:config->pinned_certificate_sha256_len];
 			}
 		}
 		NSURLSession *session = [NSURLSession sessionWithConfiguration:sessionConfig delegate:delegate delegateQueue:nil];

@@ -53,12 +53,13 @@ type appleHTTPObservedRequest struct {
 }
 
 type appleHTTPTestServer struct {
-	server         *httptest.Server
-	baseURL        string
-	dialHost       string
-	certificate    stdtls.Certificate
-	certificatePEM string
-	publicKeyHash  []byte
+	server          *httptest.Server
+	baseURL         string
+	dialHost        string
+	certificate     stdtls.Certificate
+	certificatePEM  string
+	publicKeyHash   []byte
+	certificateHash []byte
 }
 
 type appleTestAnchors struct {
@@ -589,6 +590,82 @@ func TestAppleTransportPinnedPublicKey(t *testing.T) {
 	}
 }
 
+func certificateSHA256Hash(certificateDER []byte) []byte {
+	hashValue := sha256.Sum256(certificateDER)
+	return hashValue[:]
+}
+
+func TestAppleTransportPinnedCertificateSHA256(t *testing.T) {
+	server := startAppleHTTPTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("pinned"))
+	})
+
+	goodTransport := newAppleHTTPTestTransport(t, server, option.HTTPClientOptions{
+		Version: 2,
+		OutboundTLSOptionsContainer: option.OutboundTLSOptionsContainer{
+			TLS: &option.OutboundTLSOptions{
+				Enabled:           true,
+				ServerName:        "localhost",
+				Insecure:          true,
+				CertificateSHA256: badoption.Listable[option.SHA256Fingerprint]{server.certificateHash},
+			},
+		},
+	})
+
+	response, err := goodTransport.RoundTrip(newAppleHTTPRequest(t, http.MethodGet, server.URL("/good"), nil))
+	if err != nil {
+		t.Fatalf("expected pinned request to succeed: %v", err)
+	}
+	response.Body.Close()
+
+	badHash := append([]byte(nil), server.certificateHash...)
+	badHash[0] ^= 0xff
+	badTransport := newAppleHTTPTestTransport(t, server, option.HTTPClientOptions{
+		Version: 2,
+		OutboundTLSOptionsContainer: option.OutboundTLSOptionsContainer{
+			TLS: &option.OutboundTLSOptions{
+				Enabled:           true,
+				ServerName:        "localhost",
+				Insecure:          true,
+				CertificateSHA256: badoption.Listable[option.SHA256Fingerprint]{badHash},
+			},
+		},
+	})
+
+	response, err = badTransport.RoundTrip(newAppleHTTPRequest(t, http.MethodGet, server.URL("/bad"), nil))
+	if err == nil {
+		response.Body.Close()
+		t.Fatal("expected incorrect pinned certificate to fail")
+	}
+}
+
+// The public-key pin and the certificate pin hash different things, so a value valid for one
+// must not authorise the other.
+func TestAppleTransportPinnedCertificateRejectsPublicKeyHash(t *testing.T) {
+	server := startAppleHTTPTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	transport := newAppleHTTPTestTransport(t, server, option.HTTPClientOptions{
+		Version: 2,
+		OutboundTLSOptionsContainer: option.OutboundTLSOptionsContainer{
+			TLS: &option.OutboundTLSOptions{
+				Enabled:           true,
+				ServerName:        "localhost",
+				Insecure:          true,
+				CertificateSHA256: badoption.Listable[option.SHA256Fingerprint]{server.publicKeyHash},
+			},
+		},
+	})
+
+	response, err := transport.RoundTrip(newAppleHTTPRequest(t, http.MethodGet, server.URL("/bad"), nil))
+	if err == nil {
+		response.Body.Close()
+		t.Fatal("expected public-key hash to be rejected as a certificate fingerprint")
+	}
+}
+
 func TestAppleTransportGuardrails(t *testing.T) {
 	testCases := []struct {
 		name          string
@@ -769,12 +846,13 @@ func startAppleHTTPTestServer(t *testing.T, handler http.HandlerFunc) *appleHTTP
 	baseURL.Host = net.JoinHostPort("localhost", parsedURL.Port())
 
 	return &appleHTTPTestServer{
-		server:         server,
-		baseURL:        baseURL.String(),
-		dialHost:       parsedURL.Hostname(),
-		certificate:    serverCertificate,
-		certificatePEM: serverCertificatePEM,
-		publicKeyHash:  certificatePublicKeySHA256(t, serverCertificate.Certificate[0]),
+		server:          server,
+		baseURL:         baseURL.String(),
+		dialHost:        parsedURL.Hostname(),
+		certificate:     serverCertificate,
+		certificatePEM:  serverCertificatePEM,
+		publicKeyHash:   certificatePublicKeySHA256(t, serverCertificate.Certificate[0]),
+		certificateHash: certificateSHA256Hash(serverCertificate.Certificate[0]),
 	}
 }
 
