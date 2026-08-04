@@ -1,7 +1,9 @@
 package option
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 
@@ -105,34 +107,74 @@ func (o *InboundTLSOptionsContainer) ReplaceInboundTLSOptions(options *InboundTL
 }
 
 type OutboundTLSOptions struct {
-	Enabled                    bool                                `json:"enabled,omitempty"`
-	Engine                     string                              `json:"engine,omitempty" enum:"go,apple,windows"`
-	DisableSNI                 bool                                `json:"disable_sni,omitempty"`
-	ServerName                 string                              `json:"server_name,omitempty"`
-	Insecure                   bool                                `json:"insecure,omitempty"`
-	ALPN                       badoption.Listable[string]          `json:"alpn,omitempty" examples:"http/1.1,h2,h3"`
-	MinVersion                 string                              `json:"min_version,omitempty" enum:"1.0,1.1,1.2,1.3"`
-	MaxVersion                 string                              `json:"max_version,omitempty" enum:"1.0,1.1,1.2,1.3"`
-	CipherSuites               badoption.Listable[string]          `json:"cipher_suites,omitempty"`
-	CurvePreferences           badoption.Listable[CurvePreference] `json:"curve_preferences,omitempty"`
-	Certificate                badoption.Listable[string]          `json:"certificate,omitempty"`
-	CertificatePath            string                              `json:"certificate_path,omitempty"`
-	CertificatePublicKeySHA256 badoption.Listable[[]byte]          `json:"certificate_public_key_sha256,omitempty"`
-	ClientCertificate          badoption.Listable[string]          `json:"client_certificate,omitempty"`
-	ClientCertificatePath      string                              `json:"client_certificate_path,omitempty"`
-	ClientKey                  badoption.Listable[string]          `json:"client_key,omitempty"`
-	ClientKeyPath              string                              `json:"client_key_path,omitempty"`
-	Fragment                   bool                                `json:"fragment,omitempty"`
-	FragmentFallbackDelay      badoption.Duration                  `json:"fragment_fallback_delay,omitempty"`
-	RecordFragment             bool                                `json:"record_fragment,omitempty"`
-	Spoof                      string                              `json:"spoof,omitempty"`
-	SpoofMethod                string                              `json:"spoof_method,omitempty" enum:"wrong-sequence,wrong-checksum,wrong-ack,wrong-md5,wrong-timestamp"`
-	KernelTx                   bool                                `json:"kernel_tx,omitempty"`
-	KernelRx                   bool                                `json:"kernel_rx,omitempty"`
-	HandshakeTimeout           badoption.Duration                  `json:"handshake_timeout,omitempty"`
-	ECH                        *OutboundECHOptions                 `json:"ech,omitempty"`
-	UTLS                       *OutboundUTLSOptions                `json:"utls,omitempty"`
-	Reality                    *OutboundRealityOptions             `json:"reality,omitempty"`
+	Enabled                    bool                                  `json:"enabled,omitempty"`
+	Engine                     string                                `json:"engine,omitempty" enum:"go,apple,windows"`
+	DisableSNI                 bool                                  `json:"disable_sni,omitempty"`
+	ServerName                 string                                `json:"server_name,omitempty"`
+	Insecure                   bool                                  `json:"insecure,omitempty"`
+	ALPN                       badoption.Listable[string]            `json:"alpn,omitempty" examples:"http/1.1,h2,h3"`
+	MinVersion                 string                                `json:"min_version,omitempty" enum:"1.0,1.1,1.2,1.3"`
+	MaxVersion                 string                                `json:"max_version,omitempty" enum:"1.0,1.1,1.2,1.3"`
+	CipherSuites               badoption.Listable[string]            `json:"cipher_suites,omitempty"`
+	CurvePreferences           badoption.Listable[CurvePreference]   `json:"curve_preferences,omitempty"`
+	Certificate                badoption.Listable[string]            `json:"certificate,omitempty"`
+	CertificatePath            string                                `json:"certificate_path,omitempty"`
+	CertificatePublicKeySHA256 badoption.Listable[[]byte]            `json:"certificate_public_key_sha256,omitempty"`
+	CertificateSHA256          badoption.Listable[SHA256Fingerprint] `json:"certificate_sha256,omitempty"`
+	ClientCertificate          badoption.Listable[string]            `json:"client_certificate,omitempty"`
+	ClientCertificatePath      string                                `json:"client_certificate_path,omitempty"`
+	ClientKey                  badoption.Listable[string]            `json:"client_key,omitempty"`
+	ClientKeyPath              string                                `json:"client_key_path,omitempty"`
+	Fragment                   bool                                  `json:"fragment,omitempty"`
+	FragmentFallbackDelay      badoption.Duration                    `json:"fragment_fallback_delay,omitempty"`
+	RecordFragment             bool                                  `json:"record_fragment,omitempty"`
+	Spoof                      string                                `json:"spoof,omitempty"`
+	SpoofMethod                string                                `json:"spoof_method,omitempty" enum:"wrong-sequence,wrong-checksum,wrong-ack,wrong-md5,wrong-timestamp"`
+	KernelTx                   bool                                  `json:"kernel_tx,omitempty"`
+	KernelRx                   bool                                  `json:"kernel_rx,omitempty"`
+	HandshakeTimeout           badoption.Duration                    `json:"handshake_timeout,omitempty"`
+	ECH                        *OutboundECHOptions                   `json:"ech,omitempty"`
+	UTLS                       *OutboundUTLSOptions                  `json:"utls,omitempty"`
+	Reality                    *OutboundRealityOptions               `json:"reality,omitempty"`
+}
+
+// SHA256Fingerprint is a SHA-256 hash of a DER-encoded certificate, written in JSON as
+// a hex string. Colons, dashes and spaces are accepted as separators so that fingerprints
+// can be pasted straight from openssl, browsers or other clients.
+type SHA256Fingerprint []byte
+
+func ParseSHA256Fingerprint(value string) (SHA256Fingerprint, error) {
+	value = strings.NewReplacer(":", "", "-", "", " ", "").Replace(value)
+	if len(value) != sha256.Size*2 {
+		return nil, E.New("invalid SHA-256 fingerprint: expected ", sha256.Size*2, " hex characters, got ", len(value))
+	}
+	fingerprint, err := hex.DecodeString(value)
+	if err != nil {
+		return nil, E.Cause(err, "decode SHA-256 fingerprint")
+	}
+	return fingerprint, nil
+}
+
+func (f SHA256Fingerprint) MarshalJSON() ([]byte, error) {
+	return json.Marshal(hex.EncodeToString(f))
+}
+
+func (f *SHA256Fingerprint) UnmarshalJSON(data []byte) error {
+	var stringValue string
+	err := json.Unmarshal(data, &stringValue)
+	if err != nil {
+		return err
+	}
+	fingerprint, err := ParseSHA256Fingerprint(stringValue)
+	if err != nil {
+		return err
+	}
+	*f = fingerprint
+	return nil
+}
+
+func (f SHA256Fingerprint) DescribeSchema(builder schema.Builder) (*schema.Node, error) {
+	return schema.StringNode(), nil
 }
 
 type OutboundTLSOptionsContainer struct {

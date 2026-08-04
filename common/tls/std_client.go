@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"net"
 	"strings"
 	"time"
@@ -292,4 +293,30 @@ func VerifyPublicKeySHA256(knownHashValues [][]byte, rawCerts [][]byte) error {
 		}
 	}
 	return E.New("unrecognized remote public key: ", base64.StdEncoding.EncodeToString(hashValue[:]))
+}
+
+// VerifyCertificateSHA256 pins the SHA-256 hash of a DER-encoded certificate. The whole chain
+// is scanned, so a fingerprint taken from an issuer also authorises the peer. Unparsable
+// entries are skipped so a malformed leaf cannot hide a pinned certificate below it.
+func VerifyCertificateSHA256(knownHashValues [][]byte, rawCerts [][]byte) error {
+	for _, rawCert := range rawCerts {
+		certificate, err := x509.ParseCertificate(rawCert)
+		if err != nil {
+			continue
+		}
+		hashValue := sha256.Sum256(certificate.Raw)
+		for _, value := range knownHashValues {
+			if bytes.Equal(value, hashValue[:]) {
+				return nil
+			}
+		}
+	}
+	if len(rawCerts) > 0 {
+		leafCertificate, err := x509.ParseCertificate(rawCerts[0])
+		if err == nil {
+			hashValue := sha256.Sum256(leafCertificate.Raw)
+			return E.New("unrecognized remote certificate: ", hex.EncodeToString(hashValue[:]))
+		}
+	}
+	return E.New("unrecognized remote certificate")
 }
