@@ -63,6 +63,37 @@ func TestUTLSClientHandshakeRejectsWrongFingerprint(t *testing.T) {
 	require.ErrorContains(t, err, "unrecognized remote certificate")
 }
 
+// REALITY installs its own peer verifier on every handshake, which would overwrite any pin.
+// Rejecting the combination is the only way to avoid a config that reads as pinned but is not.
+func TestRealityClientRejectsCertificatePins(t *testing.T) {
+	t.Parallel()
+
+	certificate := generateTestServerCertificate(t, "localhost")
+	realityOptions := &option.OutboundRealityOptions{
+		Enabled:   true,
+		PublicKey: "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+		ShortID:   "0123456789abcdef",
+	}
+
+	_, err := tls.NewRealityClient(context.Background(), nil, "localhost", option.OutboundTLSOptions{
+		Enabled:           true,
+		ServerName:        "localhost",
+		UTLS:              &option.OutboundUTLSOptions{Enabled: true},
+		Reality:           realityOptions,
+		CertificateSHA256: badoption.Listable[option.SHA256Fingerprint]{fingerprintOf(certificate)},
+	})
+	require.ErrorContains(t, err, "certificate_sha256")
+
+	_, err = tls.NewRealityClient(context.Background(), nil, "localhost", option.OutboundTLSOptions{
+		Enabled:                    true,
+		ServerName:                 "localhost",
+		UTLS:                       &option.OutboundUTLSOptions{Enabled: true},
+		Reality:                    realityOptions,
+		CertificatePublicKeySHA256: badoption.Listable[[]byte]{make([]byte, 32)},
+	})
+	require.ErrorContains(t, err, "certificate_public_key_sha256")
+}
+
 func TestUTLSClientRejectsFingerprintCombinedWithCertificate(t *testing.T) {
 	t.Parallel()
 

@@ -62,6 +62,14 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 	if options.Spoof != "" || options.SpoofMethod != "" {
 		return nil, E.New("spoof is unsupported in reality")
 	}
+	// reality installs its own peer verifier on every handshake, which would overwrite a pin.
+	pins, err := ParseCertificatePins(options)
+	if err != nil {
+		return nil, err
+	}
+	if pins.Enabled() {
+		return nil, E.New(pins.optionName(), " is unsupported in reality")
+	}
 
 	uClient, err := newUTLSClient(ctx, logger, serverAddress, options, allowEmptyServerName)
 	if err != nil {
