@@ -19,6 +19,7 @@ type SystemTLSValidated struct {
 	UserPEM    []byte
 	Exclusive  bool
 	Store      adapter.CertificateStore
+	Pins       CertificatePins
 }
 
 func ValidateSystemTLSOptions(ctx context.Context, options option.OutboundTLSOptions, engineName string) (SystemTLSValidated, error) {
@@ -52,8 +53,9 @@ func ValidateSystemTLSOptions(ctx context.Context, options option.OutboundTLSOpt
 	if options.Spoof != "" || options.SpoofMethod != "" {
 		return SystemTLSValidated{}, E.New("spoof is unsupported in ", engineName)
 	}
-	if len(options.CertificatePublicKeySHA256) > 0 && (len(options.Certificate) > 0 || options.CertificatePath != "") {
-		return SystemTLSValidated{}, E.New("certificate_public_key_sha256 is conflict with certificate or certificate_path")
+	pins, err := ParseCertificatePins(options)
+	if err != nil {
+		return SystemTLSValidated{}, err
 	}
 	var minVersion uint16
 	if options.MinVersion != "" {
@@ -81,6 +83,7 @@ func ValidateSystemTLSOptions(ctx context.Context, options option.OutboundTLSOpt
 		UserPEM:    userPEM,
 		Exclusive:  exclusive,
 		Store:      store,
+		Pins:       pins,
 	}, nil
 }
 

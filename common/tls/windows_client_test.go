@@ -593,6 +593,47 @@ func TestWindowsClientHandshakeHonorsPublicKeyPinFailure(t *testing.T) {
 	}
 }
 
+func TestWindowsClientHandshakeHonorsCertificateFingerprintSuccess(t *testing.T) {
+	serverCertificate, _ := newWindowsTestCertificate(t, "localhost")
+	_, serverAddress := startWindowsTLSTestServer(t, &stdtls.Config{
+		Certificates: []stdtls.Certificate{serverCertificate},
+	})
+
+	clientConn, err := newWindowsTestClientConn(t, serverAddress, option.OutboundTLSOptions{
+		Enabled:           true,
+		Engine:            C.TLSEngineWindows,
+		ServerName:        "localhost",
+		CertificateSHA256: badoption.Listable[option.SHA256Fingerprint]{certificatePin(serverCertificate)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientConn.Close()
+}
+
+func TestWindowsClientHandshakeHonorsCertificateFingerprintFailure(t *testing.T) {
+	serverCertificate, _ := newWindowsTestCertificate(t, "localhost")
+	_, serverAddress := startWindowsTLSTestServer(t, &stdtls.Config{
+		Certificates: []stdtls.Certificate{serverCertificate},
+	})
+
+	clientConn, err := newWindowsTestClientConn(t, serverAddress, option.OutboundTLSOptions{
+		Enabled:           true,
+		Engine:            C.TLSEngineWindows,
+		ServerName:        "localhost",
+		CertificateSHA256: badoption.Listable[option.SHA256Fingerprint]{make([]byte, 32)},
+	})
+	if err == nil {
+		clientConn.Close()
+		t.Fatal("expected certificate fingerprint mismatch to fail")
+	}
+	// Asserting the reason, not just any failure: an untrusted self-signed certificate would
+	// fail chain verification anyway, which would mask the pin never being applied.
+	if !strings.Contains(err.Error(), "unrecognized remote certificate") {
+		t.Fatalf("expected fingerprint mismatch error, got: %v", err)
+	}
+}
+
 func TestWindowsClientHandshakeContextCancellation(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -2203,6 +2244,11 @@ func publicKeyPin(t *testing.T, cert *x509.Certificate) []byte {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(pub)
+	return sum[:]
+}
+
+func certificatePin(certificate stdtls.Certificate) option.SHA256Fingerprint {
+	sum := sha256.Sum256(certificate.Certificate[0])
 	return sum[:]
 }
 

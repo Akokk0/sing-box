@@ -7,7 +7,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/hex"
 	"net"
 	"strings"
 	"time"
@@ -135,13 +134,14 @@ func newSTDClient(ctx context.Context, logger logger.ContextLogger, serverAddres
 	} else if options.DisableSNI {
 		tlsConfig.InsecureSkipVerify = true
 	}
-	if len(options.CertificatePublicKeySHA256) > 0 {
-		if len(options.Certificate) > 0 || options.CertificatePath != "" {
-			return nil, E.New("certificate_public_key_sha256 is conflict with certificate or certificate_path")
-		}
+	pins, err := ParseCertificatePins(options)
+	if err != nil {
+		return nil, err
+	}
+	if pins.Enabled() {
 		tlsConfig.InsecureSkipVerify = true
 		tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-			return VerifyPublicKeySHA256(options.CertificatePublicKeySHA256, rawCerts)
+			return pins.Verify(rawCerts)
 		}
 	}
 	if len(options.ALPN) > 0 {
@@ -293,30 +293,4 @@ func VerifyPublicKeySHA256(knownHashValues [][]byte, rawCerts [][]byte) error {
 		}
 	}
 	return E.New("unrecognized remote public key: ", base64.StdEncoding.EncodeToString(hashValue[:]))
-}
-
-// VerifyCertificateSHA256 pins the SHA-256 hash of a DER-encoded certificate. The whole chain
-// is scanned, so a fingerprint taken from an issuer also authorises the peer. Unparsable
-// entries are skipped so a malformed leaf cannot hide a pinned certificate below it.
-func VerifyCertificateSHA256(knownHashValues [][]byte, rawCerts [][]byte) error {
-	for _, rawCert := range rawCerts {
-		certificate, err := x509.ParseCertificate(rawCert)
-		if err != nil {
-			continue
-		}
-		hashValue := sha256.Sum256(certificate.Raw)
-		for _, value := range knownHashValues {
-			if bytes.Equal(value, hashValue[:]) {
-				return nil
-			}
-		}
-	}
-	if len(rawCerts) > 0 {
-		leafCertificate, err := x509.ParseCertificate(rawCerts[0])
-		if err == nil {
-			hashValue := sha256.Sum256(leafCertificate.Raw)
-			return E.New("unrecognized remote certificate: ", hex.EncodeToString(hashValue[:]))
-		}
-	}
-	return E.New("unrecognized remote certificate")
 }

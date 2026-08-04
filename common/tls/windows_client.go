@@ -102,8 +102,8 @@ func (c *windowsClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	if err != nil {
 		return nil, err
 	}
-	if len(c.certificatePublicKeySHA256) > 0 {
-		err = VerifyPublicKeySHA256(c.certificatePublicKeySHA256, rawCerts)
+	if c.pins.Enabled() {
+		err = c.pins.Verify(rawCerts)
 		if err != nil {
 			return nil, err
 		}
