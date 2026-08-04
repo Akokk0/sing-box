@@ -28,6 +28,13 @@ type systemTLSConfig struct {
 	store            adapter.CertificateStore
 }
 
+func (p CertificatePins) clone() CertificatePins {
+	return CertificatePins{
+		PublicKeySHA256:   append([][]byte(nil), p.PublicKeySHA256...),
+		CertificateSHA256: append([][]byte(nil), p.CertificateSHA256...),
+	}
+}
+
 func (c *systemTLSConfig) ServerName() string {
 	return c.serverName
 }

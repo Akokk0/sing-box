@@ -46,13 +46,6 @@ func (p CertificatePins) Enabled() bool {
 	return len(p.PublicKeySHA256) > 0 || len(p.CertificateSHA256) > 0
 }
 
-func (p CertificatePins) clone() CertificatePins {
-	return CertificatePins{
-		PublicKeySHA256:   append([][]byte(nil), p.PublicKeySHA256...),
-		CertificateSHA256: append([][]byte(nil), p.CertificateSHA256...),
-	}
-}
-
 // Verify applies every configured pin; all of them must match.
 func (p CertificatePins) Verify(rawCerts [][]byte) error {
 	if len(p.PublicKeySHA256) > 0 {
