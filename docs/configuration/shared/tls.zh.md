@@ -9,6 +9,7 @@ icon: material/new-box
     :material-plus: [spoof](#spoof)  
     :material-plus: [spoof_method](#spoof_method)  
     :material-plus: [engine](#engine)  
+    :material-plus: [certificate_sha256](#certificate_sha256)  
     :material-delete-clock: [acme](#acme-字段)
 
 !!! quote "sing-box 1.13.0 中的更改"
@@ -123,6 +124,7 @@ icon: material/new-box
   "certificate": "",
   "certificate_path": "",
   "certificate_public_key_sha256": [],
+  "certificate_sha256": [],
   "client_certificate": [],
   "client_certificate_path": "",
   "client_key": [],
@@ -217,6 +219,7 @@ TLS 版本值：
 * `max_version`
 * `certificate` / `certificate_path`
 * `certificate_public_key_sha256`
+* `certificate_sha256`
 * `handshake_timeout`
 
 不支持的字段：
@@ -250,6 +253,7 @@ TLS 版本值：
 * `max_version`
 * `certificate` / `certificate_path`
 * `certificate_public_key_sha256`
+* `certificate_sha256`
 * `handshake_timeout`
 
 不支持的字段：
@@ -351,6 +355,36 @@ openssl x509 -in certificate.pem -pubkey -noout | openssl pkey -pubin -outform d
 # 对于远程服务器的证书
 echo | openssl s_client -servername example.com -connect example.com:443 2>/dev/null | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl enc -base64
 ```
+
+#### certificate_sha256
+
+!!! question "自 sing-box 1.14.0 起"
+
+==仅客户端==
+
+服务器证书的 SHA-256 指纹列表，十六进制格式。
+
+冒号、短横线和空格均可作为分隔符，因此可以直接粘贴 openssl、浏览器或其他客户端显示的指纹。
+
+设置后将不再通过证书颁发机构验证证书链：只要服务器提供的任一证书与列表中的指纹匹配即接受。
+因此它可以在使用自签名证书时替代 `certificate` / `certificate_path`，并与它们冲突。
+
+`certificate_public_key_sha256` 计算的是叶子证书公钥的哈希，而本选项计算的是整个 DER 编码证书的
+哈希，两者的值不可互换。
+
+要生成证书的 SHA-256 指纹，请使用以下命令：
+
+```bash
+# 对于证书文件
+openssl x509 -in certificate.pem -outform der | openssl dgst -sha256
+
+# 对于远程服务器的证书
+echo | openssl s_client -servername example.com -connect example.com:443 2>/dev/null | openssl x509 -outform der | openssl dgst -sha256
+```
+
+!!! note ""
+
+    在 `reality` 中不支持。
 
 #### client_certificate
 

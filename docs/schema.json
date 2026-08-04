@@ -14085,6 +14085,19 @@
             }
           ]
         },
+        "certificate_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
         "client_certificate": {
           "anyOf": [
             {

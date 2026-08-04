@@ -9,6 +9,7 @@ icon: material/new-box
     :material-plus: [spoof](#spoof)  
     :material-plus: [spoof_method](#spoof_method)  
     :material-plus: [engine](#engine)  
+    :material-plus: [certificate_sha256](#certificate_sha256)  
     :material-delete-clock: [acme](#acme-fields)
 
 !!! quote "Changes in sing-box 1.13.0"
@@ -123,6 +124,7 @@ icon: material/new-box
   "certificate": "",
   "certificate_path": "",
   "certificate_public_key_sha256": [],
+  "certificate_sha256": [],
   "client_certificate": [],
   "client_certificate_path": "",
   "client_key": [],
@@ -217,6 +219,7 @@ Supported fields:
 * `max_version`
 * `certificate` / `certificate_path`
 * `certificate_public_key_sha256`
+* `certificate_sha256`
 * `handshake_timeout`
 
 Unsupported fields:
@@ -250,6 +253,7 @@ Supported fields:
 * `max_version`
 * `certificate` / `certificate_path`
 * `certificate_public_key_sha256`
+* `certificate_sha256`
 * `handshake_timeout`
 
 Unsupported fields:
@@ -356,6 +360,38 @@ openssl x509 -in certificate.pem -pubkey -noout | openssl pkey -pubin -outform d
 # For a certificate from a remote server
 echo | openssl s_client -servername example.com -connect example.com:443 2>/dev/null | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl enc -base64
 ```
+
+#### certificate_sha256
+
+!!! question "Since sing-box 1.14.0"
+
+==Client only==
+
+List of SHA-256 fingerprints of server certificates, in hex format.
+
+Colons, dashes and spaces are accepted as separators, so a fingerprint can be pasted as-is from
+openssl, a browser or another client.
+
+When set, the certificate chain is not verified against certificate authorities: the peer is
+accepted if any certificate it presents matches one of the fingerprints. It therefore replaces
+`certificate` / `certificate_path` for self-signed certificates, and conflicts with them.
+
+Unlike `certificate_public_key_sha256`, which hashes the public key of the leaf certificate,
+this option hashes the whole DER-encoded certificate. The two values are not interchangeable.
+
+To generate the SHA-256 fingerprint of a certificate, use the following commands:
+
+```bash
+# For a certificate file
+openssl x509 -in certificate.pem -outform der | openssl dgst -sha256
+
+# For the certificate of a remote server
+echo | openssl s_client -servername example.com -connect example.com:443 2>/dev/null | openssl x509 -outform der | openssl dgst -sha256
+```
+
+!!! note ""
+
+    Unsupported in `reality`.
 
 #### client_certificate
 
