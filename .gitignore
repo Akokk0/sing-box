@@ -8,6 +8,10 @@
 /dist/
 /sing-box
 /sing-box.exe
+/sing-box-*
+/*.bak
+/*.yaml
+/*.yml
 /build/
 /*.jar
 /*.aar
