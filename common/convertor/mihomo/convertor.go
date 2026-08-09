@@ -10,10 +10,9 @@ import (
 	"context"
 	"strconv"
 
+	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json"
-
-	"github.com/sagernet/sing-box/option"
 
 	"gopkg.in/yaml.v3"
 )

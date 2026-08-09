@@ -4,7 +4,6 @@ import (
 	"regexp"
 
 	"github.com/sagernet/sing-box/option"
-
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
