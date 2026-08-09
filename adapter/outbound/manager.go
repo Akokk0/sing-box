@@ -258,6 +258,31 @@ func (m *Manager) Remove(tag string) error {
 	return nil
 }
 
+// UpdateDependencies 实现 adapter.DynamicOutboundManager。
+func (m *Manager) UpdateDependencies(tag string, dependencies []string) error {
+	m.access.Lock()
+	defer m.access.Unlock()
+	if _, found := m.outboundByTag[tag]; !found {
+		return os.ErrInvalid
+	}
+	// 先把 tag 从所有反向边上摘掉，再按新的依赖重新挂上。逐条增删的话，
+	// 一次成员替换里同时增和删的那些会互相盖掉。
+	for dependency, dependBy := range m.dependByTag {
+		remaining := common.Filter(dependBy, func(it string) bool {
+			return it != tag
+		})
+		if len(remaining) == 0 {
+			delete(m.dependByTag, dependency)
+		} else {
+			m.dependByTag[dependency] = remaining
+		}
+	}
+	for _, dependency := range dependencies {
+		m.dependByTag[dependency] = append(m.dependByTag[dependency], tag)
+	}
+	return nil
+}
+
 func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, inboundType string, options any) error {
 	if tag == "" {
 		return os.ErrInvalid

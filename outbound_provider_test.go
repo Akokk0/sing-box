@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -183,4 +185,126 @@ func TestMembershipChangeDoesNotDisturbLiveConnections(t *testing.T) {
 		t.Fatalf("remove node-b: %v", err)
 	}
 	roundTrip(t, conn, "survived a node being removed")
+}
+
+// startProbeTarget 起一个永远回 204 的本地服务，给 urltest 当探测目标。
+// 用真实的 https://www.gstatic.com/generate_204 会让测试依赖外网，又慢又飘。
+func startProbeTarget(t *testing.T) string {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	return server.URL
+}
+
+// urltest 组同样要能在运行中增删成员——而且它比 selector 难：成员表被后台的健康检查
+// 循环持有，选出来的那个还被缓存在 selectedOutboundTCP/UDP 里。
+//
+// 和 selector 一样，走着某个没被动过的节点的连接不能因为换成员而断。
+func TestURLTestAcceptsMembersAddedAtRuntimeWithoutDisturbingConnections(t *testing.T) {
+	echoAddress := startEchoServer(t)
+	instance, ctx := startBox(t, option.Options{
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "node-a"},
+			{Type: C.TypeURLTest, Tag: "proxy", Options: &option.URLTestOutboundOptions{
+				Outbounds:                 []string{"node-a"},
+				URL:                       startProbeTarget(t),
+				InterruptExistConnections: true,
+			}},
+		},
+	})
+	outboundManager := instance.Outbound()
+	proxy, _ := outboundManager.Outbound("proxy")
+
+	conn, err := proxy.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddr(echoAddress))
+	if err != nil {
+		t.Fatalf("dial through the group: %v", err)
+	}
+	defer conn.Close()
+	roundTrip(t, conn, "before the subscription update")
+
+	err = outboundManager.Create(ctx, instance.Router(),
+		instance.LogFactory().NewLogger("outbound/direct[node-b]"),
+		"node-b", C.TypeDirect, &option.DirectOutboundOptions{})
+	if err != nil {
+		t.Fatalf("create node-b: %v", err)
+	}
+	group, dynamic := proxy.(adapter.DynamicOutboundGroup)
+	if !dynamic {
+		t.Fatalf("urltest does not accept membership changes: %T", proxy)
+	}
+	if err = group.SetMembers([]string{"node-a", "node-b"}); err != nil {
+		t.Fatalf("SetMembers: %v", err)
+	}
+	if members := group.All(); len(members) != 2 || members[1] != "node-b" {
+		t.Errorf("All() = %v, want [node-a node-b]", members)
+	}
+	roundTrip(t, conn, "survived a node being added")
+
+	// 撤掉一个跟这条连接无关的节点，同样不该有任何影响。
+	if err = group.SetMembers([]string{"node-a"}); err != nil {
+		t.Fatalf("SetMembers after dropping node-b: %v", err)
+	}
+	if err = outboundManager.Remove("node-b"); err != nil {
+		t.Fatalf("remove node-b: %v", err)
+	}
+	roundTrip(t, conn, "survived a node being removed")
+}
+
+// waitForSelection 等 urltest 组测出结果并选定一个节点。
+func waitForSelection(t *testing.T, group adapter.OutboundGroup) string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if now := group.Now(); now != "" {
+			return now
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the group never selected anything")
+	return ""
+}
+
+// 机场撤掉的那个节点，恰好是组当前选中的——这条路必须走对。
+//
+// Select 会拿缓存的 selectedOutboundTCP/UDP 当比较基准，不清掉的话，一个已经被移出组
+// 的出站会继续被选中，流量就打到一个已经不存在的节点上了。
+func TestURLTestStopsSelectingARemovedMember(t *testing.T) {
+	instance, ctx := startBox(t, option.Options{
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "node-a"},
+			{Type: C.TypeDirect, Tag: "node-b"},
+			{Type: C.TypeURLTest, Tag: "proxy", Options: &option.URLTestOutboundOptions{
+				Outbounds: []string{"node-a", "node-b"},
+				URL:       startProbeTarget(t),
+			}},
+		},
+	})
+	_ = ctx
+	outboundManager := instance.Outbound()
+	proxy, _ := outboundManager.Outbound("proxy")
+	group := proxy.(adapter.DynamicOutboundGroup)
+
+	// 哪个被选中取决于实测延迟，两个都是本地直连、快慢无从预测——所以不假设，
+	// 测出来之后把被选中的那个撤掉。
+	selected := waitForSelection(t, group)
+	survivor := "node-a"
+	if selected == "node-a" {
+		survivor = "node-b"
+	}
+
+	if err := group.SetMembers([]string{survivor}); err != nil {
+		t.Fatalf("SetMembers: %v", err)
+	}
+	if err := outboundManager.Remove(selected); err != nil {
+		t.Fatalf("remove %s: %v", selected, err)
+	}
+
+	if now := group.Now(); now == selected {
+		t.Errorf("Now() = %q, but %q was removed from the group", now, selected)
+	}
+	if members := group.All(); len(members) != 1 || members[0] != survivor {
+		t.Errorf("All() = %v, want [%s]", members, survivor)
+	}
 }

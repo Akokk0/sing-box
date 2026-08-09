@@ -13,3 +13,16 @@ type DynamicOutboundGroup interface {
 	// 否则整次替换失败且组保持原样——宁可不换，也不要换成一个残缺的成员表。
 	SetMembers(tags []string) error
 }
+
+// DynamicOutboundManager 是能跟随组成员变化更新依赖记账的出站管理器。
+//
+// OutboundManager 内部有一份「谁依赖谁」的反向索引，Remove 靠它拦住还有人在用的出站。
+// 那份索引原本只在 Create 时按配置里的静态成员建一次；成员一旦能在运行中变化，它就会
+// 失真——机场撤掉的节点明明已经不在任何组里，却因为一条陈旧记录而删不掉。
+//
+// 同样是可选接口，用类型断言问。
+type DynamicOutboundManager interface {
+	OutboundManager
+	// UpdateDependencies 把 tag 这个出站依赖的对象整体换成 dependencies。
+	UpdateDependencies(tag string, dependencies []string) error
+}

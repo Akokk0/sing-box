@@ -161,6 +161,9 @@ func (s *Selector) SetMembers(tags []string) error {
 	s.tags = tags
 	s.outbounds = outbounds
 	s.access.Unlock()
+	if err := syncDependencies(s.outbound, s.Tag(), tags); err != nil {
+		return err
+	}
 
 	if selected := s.selected.Load(); selected == nil || outbounds[selected.Tag()] == nil {
 		s.selected.Store(outbounds[tags[0]])
