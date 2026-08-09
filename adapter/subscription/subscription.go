@@ -6,7 +6,6 @@ package subscription
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"os"
 	"sync"
@@ -164,7 +163,7 @@ func (s *Subscription) Update() error {
 	if response.StatusCode != http.StatusOK {
 		return E.New("unexpected status: ", response.Status)
 	}
-	content, err := io.ReadAll(response.Body)
+	content, err := readAtMost(response.Body, maxSubscriptionSize)
 	if err != nil {
 		return err
 	}
