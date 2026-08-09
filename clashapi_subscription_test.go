@@ -137,3 +137,24 @@ func TestClashAPIUpdatesASubscription(t *testing.T) {
 	proxies := providers["airport"].(map[string]any)["proxies"].([]any)
 	require.Len(t, proxies, 2)
 }
+
+// 面板的 provider 卡片上有一行「更新于 X 前」，数据来自这里。
+func TestClashAPIReportsWhenTheSubscriptionUpdated(t *testing.T) {
+	subscription := startSubscriptionServer(t, "proxies:\n"+node("HK 01", 10002))
+	baseURL := startBoxWithClashAPI(t, option.Options{
+		Subscriptions: []option.Subscription{{Tag: "airport", URL: subscription.url}},
+		Outbounds: []option.Outbound{
+			{Type: "direct", Tag: "direct"},
+			{Type: "selector", Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport"},
+			}},
+		},
+	})
+
+	airport := getJSON(t, baseURL+"/providers/proxies")["providers"].(map[string]any)["airport"].(map[string]any)
+	raw, present := airport["updatedAt"].(string)
+	require.True(t, present, "no updatedAt in %v", airport)
+	updatedAt, err := time.Parse(time.RFC3339Nano, raw)
+	require.NoError(t, err, "updatedAt %q is not RFC3339 — the dashboard cannot parse it", raw)
+	require.WithinDuration(t, time.Now(), updatedAt, time.Minute)
+}

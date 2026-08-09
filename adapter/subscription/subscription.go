@@ -48,8 +48,9 @@ type Subscription struct {
 	// 这个尺寸下 write 一次就落完。但那是两处巧合，不是保证。串起来才是保证。
 	updateAccess sync.Mutex
 
-	access sync.RWMutex
-	nodes  []string
+	access    sync.RWMutex
+	nodes     []string
+	updatedAt time.Time
 	// content 是上一次成功应用的订阅原文。机场大多数时候节点不变，比一比就能整轮跳过。
 	content []byte
 }
@@ -102,6 +103,12 @@ func (s *Subscription) Nodes() []string {
 	return s.nodes
 }
 
+func (s *Subscription) UpdatedAt() time.Time {
+	s.access.RLock()
+	defer s.access.RUnlock()
+	return s.updatedAt
+}
+
 // Start 先用本地那份存档把节点立刻装上，再去拉新的。
 //
 // 拉取失败不能拖垮启动：路由器开机时网络往往还没通，而这份订阅正是连上网所需要的东西。
@@ -116,7 +123,13 @@ func (s *Subscription) Start() error {
 	if s.options.Path != "" {
 		content, readErr := os.ReadFile(s.options.Path)
 		if readErr == nil {
-			if applyErr := s.apply(content); applyErr != nil {
+			// 存档的年龄就是这批节点的年龄。断网重启时它可能已经放了一个星期，
+			// 面板该照实说，不能显示成刚刚更新。
+			savedAt := time.Now()
+			if info, statErr := os.Stat(s.options.Path); statErr == nil {
+				savedAt = info.ModTime()
+			}
+			if applyErr := s.applyAsOf(content, savedAt); applyErr != nil {
 				s.logger.Error("load saved subscription: ", applyErr)
 			} else {
 				s.logger.Info("loaded ", len(s.Nodes()), " nodes from ", s.options.Path)
@@ -188,6 +201,11 @@ func (s *Subscription) Update() error {
 // 顺序不能反：先把新节点装上、再让各个组重算成员、最后才摘掉消失的节点。反过来的话，
 // 组会有一瞬间指着已经被摘掉的出站。
 func (s *Subscription) apply(content []byte) error {
+	return s.applyAsOf(content, time.Now())
+}
+
+// applyAsOf 与 apply 相同，但显式指定这批内容的来源时刻。
+func (s *Subscription) applyAsOf(content []byte, asOf time.Time) error {
 	s.access.RLock()
 	unchanged := len(s.content) > 0 && string(s.content) == string(content)
 	previous := s.nodes
@@ -227,6 +245,7 @@ func (s *Subscription) apply(content []byte) error {
 	s.access.Lock()
 	s.nodes = tags
 	s.content = content
+	s.updatedAt = asOf
 	s.access.Unlock()
 
 	if s.onUpdated != nil {

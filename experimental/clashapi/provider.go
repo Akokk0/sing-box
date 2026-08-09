@@ -45,12 +45,17 @@ func providerInfo(server *Server, provider adapter.Subscription) render.M {
 		}
 		proxies = append(proxies, proxyInfo(server, detour))
 	}
-	return render.M{
+	info := render.M{
 		"name":        provider.Tag(),
 		"type":        "Proxy",
 		"vehicleType": "HTTP",
 		"proxies":     proxies,
 	}
+	// 零值不往外发。面板会拿它当日期渲染，发出去就是「更新于 1970 年」。
+	if updatedAt := provider.UpdatedAt(); !updatedAt.IsZero() {
+		info["updatedAt"] = updatedAt
+	}
+	return info
 }
 
 func getProviders(server *Server, ctx context.Context) func(w http.ResponseWriter, r *http.Request) {

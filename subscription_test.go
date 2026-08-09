@@ -859,3 +859,54 @@ func TestConcurrentUpdatesDoNotCorruptTheSavedArchive(t *testing.T) {
 			"it is a mix of two concurrent writes", len(saved), len(first), len(second))
 	}
 }
+
+// 面板上那句「更新于 X 前」要有个来源。
+func TestSubscriptionReportsWhenItLastUpdated(t *testing.T) {
+	before := time.Now()
+	subscription := startSubscriptionServer(t, "proxies:\n"+node("HK 01", 10001))
+	_, ctx := startBox(t, option.Options{
+		Subscriptions: []option.Subscription{{Tag: "airport", URL: subscription.url}},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "direct"},
+			{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport"},
+			}},
+		},
+	})
+	airport, _ := service.FromContext[adapter.SubscriptionManager](ctx).Subscription("airport")
+	updatedAt := airport.UpdatedAt()
+	require.False(t, updatedAt.Before(before), "UpdatedAt %v predates the box starting at %v", updatedAt, before)
+	require.False(t, updatedAt.After(time.Now()), "UpdatedAt is in the future: %v", updatedAt)
+}
+
+// 从本地存档启动时，「上次更新」是存档落盘的那一刻，不是开机这一刻。
+//
+// 填 time.Now() 的话，每次重启都显示「刚刚更新」——而路由器断网重启时，那份存档可能
+// 已经放了一个星期。面板会理直气壮地告诉你订阅是新的，恰恰在它最可能过期的时候。
+func TestSubscriptionLoadedFromArchiveReportsTheArchivesAge(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "airport.yaml")
+	require.NoError(t, os.WriteFile(archive, []byte("proxies:\n"+node("HK 01", 10001)), 0o600))
+	threeDaysAgo := time.Now().Add(-72 * time.Hour)
+	require.NoError(t, os.Chtimes(archive, threeDaysAgo, threeDaysAgo))
+
+	// URL 指向一个不应答的地址：启动时存档已经供上了节点，就不该再去拉。
+	_, ctx := startBox(t, option.Options{
+		Subscriptions: []option.Subscription{{
+			Tag:             "airport",
+			URL:             startHangingServer(t),
+			Path:            archive,
+			DownloadTimeout: badoption.Duration(500 * time.Millisecond),
+		}},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "direct"},
+			{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport"},
+			}},
+		},
+	})
+
+	airport, _ := service.FromContext[adapter.SubscriptionManager](ctx).Subscription("airport")
+	require.Equal(t, []string{"HK 01"}, airport.Nodes(), "the archive did not supply the nodes")
+	require.WithinDuration(t, threeDaysAgo, airport.UpdatedAt(), time.Minute,
+		"UpdatedAt should be the archive's mtime, not the moment we booted")
+}

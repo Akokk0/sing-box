@@ -1,11 +1,16 @@
 package adapter
 
+import "time"
+
 // Subscription 是一份订阅：它自己去拉、转成出站、在运行中把节点增删替换到出站
 // 管理器里，全程不重启进程、不重写配置文件。
 type Subscription interface {
 	Tag() string
 	// Nodes 返回当前这份订阅提供的节点 tag，保持订阅里的原始顺序。
 	Nodes() []string
+	// UpdatedAt 是当前这批节点的来源时间。从本地存档装上来的，报的是存档落盘的时刻，
+	// 不是开机的时刻——否则每次重启都会显示「刚刚更新」，而那份存档可能已经很旧了。
+	UpdatedAt() time.Time
 	// Update 立刻拉一次。内容跟上次一样时什么都不做。
 	Update() error
 }
