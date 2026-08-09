@@ -40,6 +40,14 @@ type Subscription struct {
 	// onUpdated 在节点集合变化之后通知管理器去重算各个组的成员。
 	onUpdated func()
 
+	// updateAccess 让更新一次只跑一个。面板点一下「更新」恰好撞上后台的定时更新，
+	// 两次 apply 就会交错：后一次手里的 previous 已经过时，删节点会删错；两次还会
+	// 同时 os.WriteFile 同一个存档。
+	//
+	// 目前这两件事都没真的坏过——删错被出站管理器的依赖检查挡下了，存档没写坏是因为
+	// 这个尺寸下 write 一次就落完。但那是两处巧合，不是保证。串起来才是保证。
+	updateAccess sync.Mutex
+
 	access sync.RWMutex
 	nodes  []string
 	// content 是上一次成功应用的订阅原文。机场大多数时候节点不变，比一比就能整轮跳过。
@@ -146,7 +154,12 @@ func (s *Subscription) loop() {
 }
 
 // Update 拉一次订阅并应用。
+//
+// 整个过程持锁，拉取也算在内：撞上的那一次会排队等待，而不是并行跑第二遍。等到之后
+// 它照样会自己拉一次，但内容多半没变，apply 一比就整轮跳过，代价只有一次请求。
 func (s *Subscription) Update() error {
+	s.updateAccess.Lock()
+	defer s.updateAccess.Unlock()
 	// 超时挂在这次请求上，而不是 http.Client 上：Client 的 Timeout 会把读 body 也算进去，
 	// 但它是给所有请求共用的，改起来影响面更大。
 	ctx, cancel := context.WithTimeout(s.ctx, s.timeout)

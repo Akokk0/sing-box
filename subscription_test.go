@@ -7,7 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -712,5 +715,147 @@ func TestSubscriptionUpdateGivesUpOnAServerThatNeverAnswers(t *testing.T) {
 		require.Error(t, err, "Update returned success from a server that never answered")
 	case <-time.After(5 * time.Second):
 		t.Fatal("Update never returned — the update loop would be dead from here on")
+	}
+}
+
+// startAlternatingSubscriptionServer 每次请求交替返回两份不同的订阅，并在应答前拖一下，
+// 好让并发的两次更新必然重叠。
+func startAlternatingSubscriptionServer(t *testing.T, first string, second string) string {
+	t.Helper()
+	var access sync.Mutex
+	var count int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		access.Lock()
+		count++
+		content := first
+		if count%2 == 0 {
+			content = second
+		}
+		access.Unlock()
+		// 窗口开得足够宽，两次更新一定撞在一起。
+		time.Sleep(30 * time.Millisecond)
+		_, _ = w.Write([]byte(content))
+	}))
+	t.Cleanup(server.Close)
+	return server.URL
+}
+
+// 并发更新之后，订阅报出的节点和出站管理器里的必须仍然对得上。
+//
+// 面板上连点两下「更新」、或者点一下恰好撞上后台定时更新，就会同时跑两次 apply。
+// apply 先读下 previous、再逐个 Replace、最后摘掉 previous 里消失的；两次交错时，
+// 后一次手里的 previous 已经过时，理论上会去摘别人刚装上的节点。
+//
+// 实测摘不掉：出站管理器的 Remove 有依赖检查，节点还被组引用着就删不动。也就是说这条
+// 不变量目前是靠那个检查兜住的，而不是靠更新本身的原子性。这个用例钉的是不变量，
+// 不是某个实现——兜底的东西哪天变了，它就该响。
+//
+// s.access 保护的只是字段读写，-race 对这种交错一言不发，判据只能是状态一致性。
+func TestConcurrentUpdatesLeaveConsistentState(t *testing.T) {
+	first := "proxies:\n" + node("HK 01", 10001) + node("JP 01", 10002)
+	second := "proxies:\n" + node("HK 01", 10001) + node("SG 01", 10003)
+
+	instance, ctx := startBox(t, option.Options{
+		Subscriptions: []option.Subscription{{
+			Tag: "airport",
+			URL: startAlternatingSubscriptionServer(t, first, second),
+		}},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "direct"},
+			{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport"},
+			}},
+		},
+	})
+
+	manager := service.FromContext[adapter.SubscriptionManager](ctx)
+	airport, found := manager.Subscription("airport")
+	require.True(t, found)
+
+	var wait sync.WaitGroup
+	for range 4 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_ = airport.Update()
+		}()
+	}
+	wait.Wait()
+
+	// 订阅自己报出来的节点，必须真的都在出站管理器里。
+	for _, tag := range airport.Nodes() {
+		if _, loaded := instance.Outbound().Outbound(tag); !loaded {
+			t.Errorf("subscription reports node %q but the outbound manager has no such outbound", tag)
+		}
+	}
+	// 组的成员同样。组里留一个不存在的 tag，下次重算就会整组失败。
+	proxy, _ := instance.Outbound().Outbound("proxy")
+	for _, tag := range proxy.(adapter.OutboundGroup).All() {
+		if _, loaded := instance.Outbound().Outbound(tag); !loaded {
+			t.Errorf("group holds member %q that is not in the outbound manager", tag)
+		}
+	}
+	// 而且组必须还能跟着订阅走一次——踩坏之后这一步会报 outbound not found。
+	require.NoError(t, airport.Update())
+}
+
+// bigSubscription 造一份足够大的订阅，大到 os.WriteFile 必须分多次 write 才写得完。
+func bigSubscription(t *testing.T, prefix string, count int) string {
+	t.Helper()
+	var builder strings.Builder
+	builder.WriteString("proxies:\n")
+	for i := range count {
+		builder.WriteString(node(prefix+" "+strconv.Itoa(i), 10000+i))
+	}
+	return builder.String()
+}
+
+// 并发更新之后，本地存档必须是完整的一份，不能是两份的混合。
+//
+// apply 收尾时 os.WriteFile 存档，好让下次开机立刻能用。并发跑两次就是两个 WriteFile
+// 打在同一个路径上，各自 O_TRUNC 之后再写。写坏了的后果是下次开机加载一坨半截内容——
+// 运气好解析失败（还能靠网络兜底），运气不好解析成功但只剩半份节点。
+//
+// 实测写不坏：这个尺寸下 write 一次 syscall 就落完，两份内容不会交错。也就是说这条
+// 不变量目前靠的是「订阅还不够大」，而不是写入本身受了保护。用例钉的是不变量。
+func TestConcurrentUpdatesDoNotCorruptTheSavedArchive(t *testing.T) {
+	first := bigSubscription(t, "AAAA", 400)
+	second := bigSubscription(t, "BBBB", 400)
+	archive := filepath.Join(t.TempDir(), "airport.yaml")
+
+	instance, ctx := startBox(t, option.Options{
+		Subscriptions: []option.Subscription{{
+			Tag:  "airport",
+			URL:  startAlternatingSubscriptionServer(t, first, second),
+			Path: archive,
+		}},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "direct"},
+			{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport"},
+			}},
+		},
+	})
+	_ = instance
+
+	manager := service.FromContext[adapter.SubscriptionManager](ctx)
+	airport, _ := manager.Subscription("airport")
+
+	var wait sync.WaitGroup
+	for range 6 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_ = airport.Update()
+		}()
+	}
+	wait.Wait()
+
+	saved, err := os.ReadFile(archive)
+	require.NoError(t, err)
+	// 存档必须原样等于其中一份，不能是两份的混合。
+	if string(saved) != first && string(saved) != second {
+		t.Errorf("the saved archive is neither subscription: %d bytes, first=%d second=%d\n"+
+			"it is a mix of two concurrent writes", len(saved), len(first), len(second))
 	}
 }
