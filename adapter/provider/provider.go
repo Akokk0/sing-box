@@ -237,16 +237,11 @@ func (p *Provider) resolveTransport() (adapter.HTTPTransport, error) {
 	if httpClientManager == nil {
 		return nil, E.New("missing http client manager")
 	}
-	if p.options.DownloadDetour != "" {
-		return httpClientManager.ResolveTransport(p.ctx, p.logger, option.HTTPClientOptions{
-			DialerOptions:           option.DialerOptions{Detour: p.options.DownloadDetour},
-			DisableEmptyDirectCheck: true,
-		})
-	}
-	// 默认直连。sing-box 起不来的时候更新订阅是唯一的自救手段，这时候再绕回自己就是死锁。
-	transport := httpClientManager.DefaultTransport()
-	if transport == nil {
-		return nil, E.New("default http client transport is not initialized")
-	}
-	return transport, nil
+	// 刻意不用 DefaultTransport：那个是走箱子自己的路由的。默认路由指向一个由订阅供给的
+	// 组时，启动那一刻它还空着——请求想出去得先有节点，节点却要靠这个请求拉回来，箱子
+	// 永远起不来。detour 留空 + DisableEmptyDirectCheck 得到的才是真正的直连拨号。
+	return httpClientManager.ResolveTransport(p.ctx, p.logger, option.HTTPClientOptions{
+		DialerOptions:           option.DialerOptions{Detour: p.options.DownloadDetour},
+		DisableEmptyDirectCheck: true,
+	})
 }

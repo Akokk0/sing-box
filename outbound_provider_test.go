@@ -623,3 +623,28 @@ func TestOutboundProviderDrivesGroupMembership(t *testing.T) {
 	_, loaded = instance.Outbound().Outbound("🇯🇵 Japan 01")
 	require.False(t, loaded)
 }
+
+// 拉订阅绝不能绕回 sing-box 自己。
+//
+// 默认路由指向一个由订阅供给的组时，启动那一刻它还是空的：请求想出去必须先有节点，
+// 而节点要靠这个请求拉回来。实机上这会变成
+// `initial update: ... group[🚀 PROXY] has no members`，箱子永远起不来。
+//
+// 上一版栽在这里：注释写着「默认直连」，用的却是 DefaultTransport——那个是走箱子路由的。
+func TestOutboundProviderFetchesWithoutRoutingThroughItself(t *testing.T) {
+	subscription := startSubscriptionServer(t, "proxies:\n"+node("🇭🇰 Hong Kong 01", 10002))
+
+	instance, _ := startBox(t, option.Options{
+		OutboundProviders: []option.OutboundProvider{{Tag: "airport", URL: subscription.url}},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Providers: []string{"airport"},
+			}},
+		},
+		Route: &option.RouteOptions{Final: "proxy"},
+	})
+
+	outbound, loaded := instance.Outbound().Outbound("proxy")
+	require.True(t, loaded)
+	require.Equal(t, []string{"🇭🇰 Hong Kong 01"}, outbound.(adapter.OutboundGroup).All())
+}
