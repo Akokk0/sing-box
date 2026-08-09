@@ -976,3 +976,44 @@ func TestSubscriptionSendsTheConfiguredUserAgent(t *testing.T) {
 		t.Fatal("the subscription was never fetched")
 	}
 }
+
+// 点了刷新，「上次更新」就该往前走——哪怕机场一个节点都没改。
+//
+// 机场绝大多数时候返回的东西跟上次一模一样，apply 会整轮跳过。跳过时连时间戳也不动的话，
+// 面板上那行「更新于 X 前」纹丝不动，用户看到的就是「刷新按钮坏了」。
+//
+// 这个字段的意思是「上次成功拉到东西的时刻」，不是「节点上次变化的时刻」。
+func TestSubscriptionTimestampAdvancesEvenWhenNothingChanged(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "airport.yaml")
+	subscription := startSubscriptionServer(t, "proxies:\n"+node("HK 01", 10001))
+	_, ctx := startBox(t, option.Options{
+		Subscriptions: []option.Subscription{{Tag: "airport", URL: subscription.url, Path: archive}},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "direct"},
+			{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport"},
+			}},
+		},
+	})
+	airport, _ := service.FromContext[adapter.SubscriptionManager](ctx).Subscription("airport")
+
+	first := airport.UpdatedAt()
+	require.False(t, first.IsZero())
+	firstArchive, err := os.Stat(archive)
+	require.NoError(t, err)
+
+	time.Sleep(20 * time.Millisecond)
+	// 机场返回的东西跟上次一模一样。
+	require.NoError(t, airport.Update())
+
+	require.True(t, airport.UpdatedAt().After(first),
+		"UpdatedAt did not move (%v), so the dashboard shows the same 'updated X ago' after a refresh",
+		airport.UpdatedAt())
+
+	// 存档的 mtime 也要跟上，否则重启之后「上次更新」会退回到内容最后一次变化的时刻——
+	// 那可能是好几个星期前，而我们其实一直在正常检查。
+	secondArchive, err := os.Stat(archive)
+	require.NoError(t, err)
+	require.True(t, secondArchive.ModTime().After(firstArchive.ModTime()),
+		"the archive's mtime did not move, so a restart would report a stale update time")
+}

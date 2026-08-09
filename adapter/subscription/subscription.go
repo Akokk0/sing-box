@@ -245,6 +245,20 @@ func (s *Subscription) applyAsOf(content []byte, asOf time.Time) error {
 	previous := s.nodes
 	s.access.RUnlock()
 	if unchanged {
+		// 内容没变不等于什么都没发生：我们确实成功拉到了东西。这个字段的意思是
+		// 「上次成功拉取的时刻」，不是「节点上次变化的时刻」——面板拿它显示
+		// 「更新于 X 前」，不动的话点了刷新看起来毫无反应，按钮就像是坏的。
+		s.access.Lock()
+		s.updatedAt = asOf
+		s.access.Unlock()
+		// 存档的 mtime 一起跟上。重启之后「上次更新」是从这个 mtime 恢复的，
+		// 不动的话会退回到内容最后一次变化的时刻——可能是几星期前，而这期间
+		// 我们一直在正常检查。
+		if s.options.Path != "" {
+			if err := os.Chtimes(s.options.Path, asOf, asOf); err != nil {
+				s.logger.Debug("touch saved subscription: ", err)
+			}
+		}
 		s.logger.Debug("subscription is unchanged")
 		return nil
 	}
