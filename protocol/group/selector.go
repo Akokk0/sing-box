@@ -165,8 +165,15 @@ func (s *Selector) SetMembers(tags []string) error {
 		return err
 	}
 
-	if selected := s.selected.Load(); selected == nil || outbounds[selected.Tag()] == nil {
+	// 选中的那个可能：还在（但对象被换成了新的）、彻底没了、或者还没选过。
+	// 只按 tag 判断在不在是不够的——节点被替换时 tag 一个字没变，而指针必须换。
+	switch selected := s.selected.Load(); {
+	case selected == nil:
 		s.selected.Store(outbounds[tags[0]])
+	case outbounds[selected.Tag()] == nil:
+		s.selected.Store(outbounds[tags[0]])
+	case outbounds[selected.Tag()] != selected:
+		s.selected.Store(outbounds[selected.Tag()])
 	}
 	return nil
 }

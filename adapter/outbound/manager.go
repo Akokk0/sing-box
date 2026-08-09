@@ -368,6 +368,8 @@ func (m *Manager) Replace(ctx context.Context, router adapter.Router, logger log
 	}
 	m.access.Unlock()
 
+	m.refreshDependents(tag)
+
 	if !replaced {
 		return nil
 	}
@@ -381,6 +383,33 @@ func (m *Manager) Replace(ctx context.Context, router adapter.Router, logger log
 		}
 	}
 	return nil
+}
+
+// refreshDependents 让引用了 tag 的策略组重新解析自己的成员。
+//
+// 组里存的是出站对象而不是 tag。一个节点被换掉之后，组手里那个指针还指着旧对象，新连接
+// 会继续打到机场已经废弃的那台服务器上。要求调用方在每次 Replace 之后自己记得刷新每个组
+// 是个陷阱——漏一次就是线上事故——而管理器手上本来就有反向索引，知道谁引用了这个 tag。
+func (m *Manager) refreshDependents(tag string) {
+	m.access.RLock()
+	dependents := make([]adapter.Outbound, 0, len(m.dependByTag[tag]))
+	for _, dependentTag := range m.dependByTag[tag] {
+		if dependent, found := m.outboundByTag[dependentTag]; found {
+			dependents = append(dependents, dependent)
+		}
+	}
+	m.access.RUnlock()
+
+	// 必须在锁外：SetMembers 会回头调管理器解析 tag，还会更新依赖记账。
+	for _, dependent := range dependents {
+		group, dynamic := dependent.(adapter.DynamicOutboundGroup)
+		if !dynamic {
+			continue
+		}
+		if err := group.SetMembers(group.All()); err != nil {
+			m.logger.Error("refresh group[", dependent.Tag(), "] after replacing outbound[", tag, "]: ", err)
+		}
+	}
 }
 
 func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, inboundType string, options any) error {

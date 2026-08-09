@@ -431,3 +431,90 @@ func TestReplacingANodeRetiresItGracefully(t *testing.T) {
 		return len(manager.Retiring()) == 0
 	})
 }
+
+// 组里存的是出站「对象」，不是 tag。某个节点被换掉之后，组手里那个指针还指着旧对象——
+// 新连接会继续打到机场已经废弃的那台服务器上，而不是新的那台。
+//
+// 与其要求每个调用方在 Replace 之后记得去刷新每个组（漏一次就是线上事故），不如让管理器
+// 自己通知：它手上本来就有 dependByTag，知道谁引用了这个 tag。
+//
+// 判据必须能区分新旧两个对象。关掉一个 shadowsocks 出站只会掐断它现有的流，之后照样能
+// 建新会话，所以「拨得通」证明不了组用的是哪一个。这里让替换后的节点指向一个没人监听的
+// 端口：组跟上了就一定拨不通，没跟上就一定拨得通。
+func TestReplacingANodeRefreshesTheGroupsUsingIt(t *testing.T) {
+	echoAddress := startEchoServer(t)
+	livePort := startShadowsocksServer(t)
+	deadPort := reservePort(t)
+
+	instance, ctx := startBox(t, option.Options{
+		Outbounds: []option.Outbound{
+			{Type: C.TypeShadowsocks, Tag: "node", Options: shadowsocksNode(livePort)},
+			{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Outbounds: []string{"node"},
+			}},
+		},
+	})
+	manager := instance.Outbound().(adapter.DynamicOutboundManager)
+	proxy, _ := manager.Outbound("proxy")
+	pointNodeAt := func(port uint16) {
+		t.Helper()
+		if err := manager.Replace(ctx, instance.Router(),
+			instance.LogFactory().NewLogger("outbound/shadowsocks[node]"),
+			"node", C.TypeShadowsocks, shadowsocksNode(port)); err != nil {
+			t.Fatalf("replace node: %v", err)
+		}
+	}
+	reachesEcho := func() bool {
+		conn, err := proxy.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddr(echoAddress))
+		if err != nil {
+			return false
+		}
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+		if _, err = conn.Write([]byte("ping")); err != nil {
+			return false
+		}
+		_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+		buffer := make([]byte, 4)
+		_, err = io.ReadFull(conn, buffer)
+		return err == nil && string(buffer) == "ping"
+	}
+
+	// 先让节点变成受跟踪的那种。配置里建出来的出站数不清自己身上的连接，被顶掉时
+	// 只能硬关——那是这套机制的已知边界，不是这条用例要测的东西。
+	pointNodeAt(livePort)
+
+	// 占住一条连接，等下用来验证退役不打断它。
+	live, err := proxy.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddr(echoAddress))
+	if err != nil {
+		t.Fatalf("dial through the group: %v", err)
+	}
+	defer live.Close()
+	roundTrip(t, live, "before the node was replaced")
+
+	// 机场把这个节点换到了一台不存在的服务器上。
+	pointNodeAt(deadPort)
+	if reachesEcho() {
+		t.Error("the group still reaches the old server, it is holding the replaced outbound")
+	}
+	// 与此同时，先前那条连接不受影响。
+	roundTrip(t, live, "survived its own node being replaced")
+
+	// 换回来，组同样要跟上——否则它只是碰巧坏在了正确的方向上。
+	pointNodeAt(livePort)
+	if !reachesEcho() {
+		t.Error("the group did not follow the node back to the working server")
+	}
+}
+
+// reservePort 拿一个当场释放掉的端口号：一个保证没人监听的地址。
+func reservePort(t *testing.T) uint16 {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a port: %v", err)
+	}
+	port := uint16(listener.Addr().(*net.TCPAddr).Port)
+	_ = listener.Close()
+	return port
+}
