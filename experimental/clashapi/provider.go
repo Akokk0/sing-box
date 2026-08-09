@@ -89,6 +89,13 @@ func providerInfo(server *Server, provider adapter.Subscription) render.M {
 		"type":        "Proxy",
 		"vehicleType": "HTTP",
 		"proxies":     proxies,
+		// Clash 无条件下发这两个字段（没有 omitempty），面板会直接读。给不出来的话
+		// 面板拿到 undefined，前端一个属性访问就能让整张卡片渲染失败。
+		//
+		// testUrl 是 healthcheck 不带 url 参数时实际用的目标；expectedStatus 报 "*"
+		// 是照实说：urltest 只看请求成不成，不校验状态码。
+		"testUrl":        urltest.DefaultURL,
+		"expectedStatus": "*",
 	}
 	// 零值不往外发。面板会拿它当日期渲染，发出去就是「更新于 1970 年」。
 	if updatedAt := provider.UpdatedAt(); !updatedAt.IsZero() {

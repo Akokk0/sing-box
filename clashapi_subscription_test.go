@@ -318,3 +318,27 @@ func TestClashAPIExposesASingleNodeUnderTheSubscription(t *testing.T) {
 		require.Equal(t, http.StatusNotFound, response.StatusCode)
 	})
 }
+
+// mihomo 的 provider 对象里 testUrl 和 expectedStatus 是无条件下发的（没有
+// omitempty）。面板会去读它们，拿到 undefined 时前端一个属性访问就足以让那张卡片
+// 整个渲染失败——表现就是点一下刷新，卡片闪一下就没了。
+func TestClashAPIReportsTheHealthCheckContract(t *testing.T) {
+	subscription := startSubscriptionServer(t, "proxies:\n"+node("HK 01", 10002))
+	baseURL := startBoxWithClashAPI(t, option.Options{
+		Subscriptions: []option.Subscription{{Tag: "airport", URL: subscription.url}},
+		Outbounds: []option.Outbound{
+			{Type: "direct", Tag: "direct"},
+			{Type: "selector", Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport"},
+			}},
+		},
+	})
+
+	airport := getJSON(t, baseURL+"/providers/proxies")["providers"].(map[string]any)["airport"].(map[string]any)
+	testURL, present := airport["testUrl"].(string)
+	require.True(t, present, "no testUrl in %v", airport)
+	require.NotEmpty(t, testURL)
+	status, present := airport["expectedStatus"].(string)
+	require.True(t, present, "no expectedStatus in %v", airport)
+	require.NotEmpty(t, status)
+}

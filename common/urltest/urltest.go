@@ -89,9 +89,13 @@ func URLTest(ctx context.Context, link string, detour N.Dialer) (uint16, error) 
 	return urlTest(ctx, link, detour)
 }
 
+// DefaultURL 是未指定测速地址时用的探测目标。导出是为了让 Clash API 能如实告诉
+// 面板「这份订阅是拿什么测的」，两处各写一份字面量迟早会漂移。
+const DefaultURL = "https://www.gstatic.com/generate_204"
+
 func urlTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err error) {
 	if link == "" {
-		link = "https://www.gstatic.com/generate_204"
+		link = DefaultURL
 	}
 	linkURL, err := url.Parse(link)
 	if err != nil {
