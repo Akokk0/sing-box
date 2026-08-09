@@ -6,9 +6,11 @@ package box_test
 
 import (
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"testing"
 	"time"
@@ -206,4 +208,113 @@ func TestClashAPIOmitsTrafficInfoWhenTheAirportSendsNone(t *testing.T) {
 
 	airport := getJSON(t, baseURL+"/providers/proxies")["providers"].(map[string]any)["airport"].(map[string]any)
 	require.NotContains(t, airport, "subscriptionInfo")
+}
+
+// startTLSProbeTarget 起一个本地 HTTPS 探测目标，并返回它的地址和 CA。
+//
+// 必须是 https：clashapi 会把 http:// 的测速目标丢掉换成默认的 gstatic，那样测试就
+// 依赖外网了。自签证书靠把 CA 塞进 certificate 配置解决——urltest 取的是箱子自己的
+// 根证书池。
+func startTLSProbeTarget(t *testing.T) (url string, ca string) {
+	t.Helper()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	encoded := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
+	return server.URL, string(encoded)
+}
+
+// ssNodeYAML 造一个指向本地 shadowsocks 服务端的订阅节点。
+func ssNodeYAML(name string, port uint16) string {
+	return "  - name: \"" + name + "\"\n" +
+		"    type: ss\n" +
+		"    server: 127.0.0.1\n" +
+		"    port: " + strconv.Itoa(int(port)) + "\n" +
+		"    cipher: " + shadowsocksMethod + "\n" +
+		"    password: " + shadowsocksPassword + "\n"
+}
+
+// 面板 Proxy Providers 页面上的「检查延迟」按钮走这个端点。
+//
+// 它原本是个空壳：返回 204，什么都不做。面板于是以为测完了，延迟栏却一直空着——
+// 点多少次都一样。
+func TestClashAPIHealthCheckMeasuresTheSubscriptionsNodes(t *testing.T) {
+	probeURL, ca := startTLSProbeTarget(t)
+	port := startShadowsocksServer(t)
+	subscription := startSubscriptionServer(t, "proxies:\n"+ssNodeYAML("HK 01", port))
+
+	baseURL := startBoxWithClashAPI(t, option.Options{
+		Certificate:   &option.CertificateOptions{Certificate: []string{ca}},
+		Subscriptions: []option.Subscription{{Tag: "airport", URL: subscription.url}},
+		Outbounds: []option.Outbound{
+			{Type: "direct", Tag: "direct"},
+			{Type: "selector", Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport"},
+			}},
+		},
+	})
+
+	// 测速之前，延迟历史是空的。
+	airport := getJSON(t, baseURL+"/providers/proxies")["providers"].(map[string]any)["airport"].(map[string]any)
+	history := airport["proxies"].([]any)[0].(map[string]any)["history"].([]any)
+	require.Empty(t, history, "history should start out empty")
+
+	response, err := http.Get(baseURL + "/providers/proxies/airport/healthcheck?url=" + probeURL + "&timeout=5000")
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusNoContent, response.StatusCode)
+
+	// 测完之后，面板画延迟靠的就是这个 history。
+	airport = getJSON(t, baseURL+"/providers/proxies")["providers"].(map[string]any)["airport"].(map[string]any)
+	proxy := airport["proxies"].([]any)[0].(map[string]any)
+	history = proxy["history"].([]any)
+	require.Len(t, history, 1, "the health check left no delay history — the button does nothing")
+	delay, ok := history[0].(map[string]any)["delay"].(float64)
+	require.True(t, ok, "history entry has no delay: %v", history[0])
+	require.Greater(t, delay, float64(0), "delay should be a real measurement")
+}
+
+// mihomo 在 provider 底下还挂了单个节点的两个端点，面板点某一个节点时会走这里。
+func TestClashAPIExposesASingleNodeUnderTheSubscription(t *testing.T) {
+	probeURL, ca := startTLSProbeTarget(t)
+	port := startShadowsocksServer(t)
+	subscription := startSubscriptionServer(t, "proxies:\n"+ssNodeYAML("HK01", port))
+
+	baseURL := startBoxWithClashAPI(t, option.Options{
+		Certificate:   &option.CertificateOptions{Certificate: []string{ca}},
+		Subscriptions: []option.Subscription{{Tag: "airport", URL: subscription.url}},
+		Outbounds: []option.Outbound{
+			{Type: "direct", Tag: "direct"},
+			{Type: "selector", Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport"},
+			}},
+		},
+	})
+
+	t.Run("node info", func(t *testing.T) {
+		node := getJSON(t, baseURL+"/providers/proxies/airport/HK01")
+		require.Equal(t, "HK01", node["name"])
+		require.Equal(t, "Shadowsocks", node["type"])
+	})
+
+	t.Run("node delay", func(t *testing.T) {
+		response, err := http.Get(baseURL + "/providers/proxies/airport/HK01/healthcheck?timeout=5000&url=" + url.QueryEscape(probeURL))
+		require.NoError(t, err)
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		require.Equal(t, http.StatusOK, response.StatusCode, "body: %s", body)
+		var decoded map[string]any
+		require.NoError(t, json.Unmarshal(body, &decoded))
+		require.Greater(t, decoded["delay"], float64(0))
+	})
+
+	// 这条路由挂在某一份订阅底下，就只能看到那份订阅的节点。
+	// direct 确实在出站管理器里，但它不是这份订阅给的。
+	t.Run("an outbound that is not from this subscription is not found", func(t *testing.T) {
+		response, err := http.Get(baseURL + "/providers/proxies/airport/direct")
+		require.NoError(t, err)
+		defer response.Body.Close()
+		require.Equal(t, http.StatusNotFound, response.StatusCode)
+	})
 }
