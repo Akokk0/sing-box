@@ -144,12 +144,24 @@ func (s *Subscription) Start() error {
 		}
 	}
 	if len(s.Nodes()) == 0 {
+		// 一个节点都没有，组是空的，路由无处可去——这一次必须当场拉，哪怕要等。
 		if err = s.Update(); err != nil {
 			// 起不来也要让箱子跑起来：其余出站和规则照常工作，组暂时是空的。
 			s.logger.Error("initial update: ", err)
 		}
+		go s.loop()
+		return nil
 	}
-	go s.loop()
+	// 存档已经把节点供上了，箱子可以立刻跑起来，新的在后台拉。
+	//
+	// 不拉是不行的：那等于把订阅冻结到下一个 interval（默认一整天）。机场半夜换了密码，
+	// 开机时装上的那批节点已经全废，却要到第二天这个点才会去问一次。
+	go func() {
+		if err := s.Update(); err != nil {
+			s.logger.Error("initial update: ", err)
+		}
+		s.loop()
+	}()
 	return nil
 }
 

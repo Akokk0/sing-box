@@ -910,3 +910,37 @@ func TestSubscriptionLoadedFromArchiveReportsTheArchivesAge(t *testing.T) {
 	require.WithinDuration(t, threeDaysAgo, airport.UpdatedAt(), time.Minute,
 		"UpdatedAt should be the archive's mtime, not the moment we booted")
 }
+
+// 存档是为了「立刻能用」，不是「今天不用更新了」。
+//
+// 装上存档之后还要照常去拉一次，只是不必挡着启动。不拉的话，有存档就等于把订阅冻结到
+// 下一个 interval（默认 24 小时）——机场半夜换了密码，你重启路由器，那些节点已经全废了，
+// 却要到第二天这个点才会去问一次。Start 的注释本来就写着「再去拉新的」。
+func TestSubscriptionRefreshesEvenWhenTheArchiveSuppliedNodes(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "airport.yaml")
+	require.NoError(t, os.WriteFile(archive, []byte("proxies:\n"+node("HK 01", 10001)), 0o600))
+
+	// 机场那边已经多了一个节点。
+	subscription := startSubscriptionServer(t, "proxies:\n"+node("HK 01", 10001)+node("JP 01", 10002))
+
+	instance, ctx := startBox(t, option.Options{
+		Subscriptions: []option.Subscription{{Tag: "airport", URL: subscription.url, Path: archive}},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "direct"},
+			{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport"},
+			}},
+		},
+	})
+	airport, _ := service.FromContext[adapter.SubscriptionManager](ctx).Subscription("airport")
+
+	// 存档立刻供上了节点，箱子不必等网络。
+	require.NotEmpty(t, airport.Nodes(), "the archive did not supply nodes")
+
+	// 而新的那个节点应该很快自己出现，不用等到下一个 interval。
+	waitFor(t, "the subscription to refresh past the archive", func() bool {
+		return len(airport.Nodes()) == 2
+	})
+	proxy, _ := instance.Outbound().Outbound("proxy")
+	require.ElementsMatch(t, []string{"HK 01", "JP 01"}, proxy.(adapter.OutboundGroup).All())
+}
