@@ -55,6 +55,10 @@ func providerInfo(server *Server, provider adapter.Subscription) render.M {
 	if updatedAt := provider.UpdatedAt(); !updatedAt.IsZero() {
 		info["updatedAt"] = updatedAt
 	}
+	// 同理：机场没报流量就整个字段不发，发一份全零出去等于告诉面板套餐已用光。
+	if subscriptionInfo := provider.Info(); subscriptionInfo != nil {
+		info["subscriptionInfo"] = subscriptionInfo
+	}
 	return info
 }
 

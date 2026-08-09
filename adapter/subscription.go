@@ -13,6 +13,22 @@ type Subscription interface {
 	UpdatedAt() time.Time
 	// Update 立刻拉一次。内容跟上次一样时什么都不做。
 	Update() error
+	// Info 是机场随订阅一起报回来的流量和到期信息。多数机场不报，那就是 nil。
+	Info() *SubscriptionInfo
+}
+
+// SubscriptionInfo 是机场用 subscription-userinfo 响应头报回来的用量。
+//
+// 字段名首字母大写且不带 json tag 是有意为之：clash 生态里这个对象就是这个形状，
+// 面板照着 Upload / Download / Total / Expire 读。改成小写它们就认不出来了。
+type SubscriptionInfo struct {
+	// Upload 和 Download 是已用流量，字节。
+	Upload   int64
+	Download int64
+	// Total 是套餐总量，字节。0 表示机场没报。
+	Total int64
+	// Expire 是到期时间，Unix 秒。0 表示不限期或者没报。
+	Expire int64
 }
 
 // SubscriptionManager 管住所有订阅，并负责在任何一份变化之后重算依赖它的策略组的成员。

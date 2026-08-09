@@ -51,6 +51,7 @@ type Subscription struct {
 	access    sync.RWMutex
 	nodes     []string
 	updatedAt time.Time
+	info      *adapter.SubscriptionInfo
 	// content 是上一次成功应用的订阅原文。机场大多数时候节点不变，比一比就能整轮跳过。
 	content []byte
 }
@@ -107,6 +108,12 @@ func (s *Subscription) UpdatedAt() time.Time {
 	s.access.RLock()
 	defer s.access.RUnlock()
 	return s.updatedAt
+}
+
+func (s *Subscription) Info() *adapter.SubscriptionInfo {
+	s.access.RLock()
+	defer s.access.RUnlock()
+	return s.info
 }
 
 // Start 先用本地那份存档把节点立刻装上，再去拉新的。
@@ -189,11 +196,23 @@ func (s *Subscription) Update() error {
 	if response.StatusCode != http.StatusOK {
 		return E.New("unexpected status: ", response.Status)
 	}
+	// 在读 body 之前取头：body 读坏了也不影响这条信息，而且它跟节点内容无关。
+	info := parseUserInfo(response.Header.Get(userInfoHeader))
 	content, err := readAtMost(response.Body, maxSubscriptionSize)
 	if err != nil {
 		return err
 	}
-	return s.apply(content)
+	if err = s.apply(content); err != nil {
+		return err
+	}
+	// 节点没变时 apply 会整轮跳过，但流量一直在涨，这条照样要更新。
+	// 机场偶尔不发这个头时保留上一次的值——清空会让面板显示成套餐用光了。
+	if info != nil {
+		s.access.Lock()
+		s.info = info
+		s.access.Unlock()
+	}
+	return nil
 }
 
 // apply 把一份订阅原文变成运行中的节点。

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"testing"
 	"time"
@@ -157,4 +158,52 @@ func TestClashAPIReportsWhenTheSubscriptionUpdated(t *testing.T) {
 	updatedAt, err := time.Parse(time.RFC3339Nano, raw)
 	require.NoError(t, err, "updatedAt %q is not RFC3339 — the dashboard cannot parse it", raw)
 	require.WithinDuration(t, time.Now(), updatedAt, time.Minute)
+}
+
+// 机场把流量和到期放在 subscription-userinfo 响应头里,面板的 provider 卡片靠它
+// 画「已用 / 总量」和到期日。
+func TestClashAPIExposesSubscriptionTrafficInfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("subscription-userinfo",
+			"upload=455727941; download=6174315083; total=107374182400; expire=1848124800")
+		_, _ = w.Write([]byte("proxies:\n" + node("HK 01", 10002)))
+	}))
+	t.Cleanup(server.Close)
+
+	baseURL := startBoxWithClashAPI(t, option.Options{
+		Subscriptions: []option.Subscription{{Tag: "airport", URL: server.URL}},
+		Outbounds: []option.Outbound{
+			{Type: "direct", Tag: "direct"},
+			{Type: "selector", Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport"},
+			}},
+		},
+	})
+
+	airport := getJSON(t, baseURL+"/providers/proxies")["providers"].(map[string]any)["airport"].(map[string]any)
+	raw, present := airport["subscriptionInfo"].(map[string]any)
+	require.True(t, present, "no subscriptionInfo in %v", airport)
+	// 字段名首字母大写：clash 生态里就是这个形状，面板照着这几个键读。
+	require.Equal(t, float64(455727941), raw["Upload"])
+	require.Equal(t, float64(6174315083), raw["Download"])
+	require.Equal(t, float64(107374182400), raw["Total"])
+	require.Equal(t, float64(1848124800), raw["Expire"])
+}
+
+// 多数机场根本不发那个头。这时候绝不能编一份全零的出来——面板会画成
+// 「已用 0 / 总量 0」，看着就像套餐已经用光。
+func TestClashAPIOmitsTrafficInfoWhenTheAirportSendsNone(t *testing.T) {
+	subscription := startSubscriptionServer(t, "proxies:\n"+node("HK 01", 10002))
+	baseURL := startBoxWithClashAPI(t, option.Options{
+		Subscriptions: []option.Subscription{{Tag: "airport", URL: subscription.url}},
+		Outbounds: []option.Outbound{
+			{Type: "direct", Tag: "direct"},
+			{Type: "selector", Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport"},
+			}},
+		},
+	})
+
+	airport := getJSON(t, baseURL+"/providers/proxies")["providers"].(map[string]any)["airport"].(map[string]any)
+	require.NotContains(t, airport, "subscriptionInfo")
 }
