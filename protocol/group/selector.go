@@ -3,6 +3,7 @@ package group
 import (
 	"context"
 	"net"
+	"sync"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -25,16 +26,20 @@ func RegisterSelector(registry *outbound.Registry) {
 
 var (
 	_ adapter.OutboundGroup           = (*Selector)(nil)
+	_ adapter.DynamicOutboundGroup    = (*Selector)(nil)
 	_ adapter.ConnectionHandler       = (*Selector)(nil)
 	_ adapter.PacketConnectionHandler = (*Selector)(nil)
 )
 
 type Selector struct {
 	outbound.Adapter
-	ctx                          context.Context
-	outbound                     adapter.OutboundManager
-	connection                   adapter.ConnectionManager
-	logger                       logger.ContextLogger
+	ctx        context.Context
+	outbound   adapter.OutboundManager
+	connection adapter.ConnectionManager
+	logger     logger.ContextLogger
+	// access 只护住成员表。数据面（DialContext / NewConnection）读的是 selected，
+	// 那是个原子值——换成员不该给每一次拨号都加上一把锁。
+	access                       sync.RWMutex
 	tags                         []string
 	defaultTag                   string
 	outbounds                    map[string]adapter.Outbound
@@ -73,20 +78,20 @@ func (s *Selector) Network() []string {
 }
 
 func (s *Selector) Start() error {
-	for i, tag := range s.tags {
-		detour, loaded := s.outbound.Outbound(tag)
-		if !loaded {
-			return E.New("outbound ", i, " not found: ", tag)
-		}
-		s.outbounds[tag] = detour
+	outbounds, err := s.resolve(s.tags)
+	if err != nil {
+		return err
 	}
+	s.access.Lock()
+	s.outbounds = outbounds
+	s.access.Unlock()
 
 	if s.Tag() != "" {
 		cacheFile := service.FromContext[adapter.CacheFile](s.ctx)
 		if cacheFile != nil {
 			selected := cacheFile.LoadSelected(s.Tag())
 			if selected != "" {
-				detour, loaded := s.outbounds[selected]
+				detour, loaded := outbounds[selected]
 				if loaded {
 					s.selected.Store(detour)
 					return nil
@@ -96,7 +101,7 @@ func (s *Selector) Start() error {
 	}
 
 	if s.defaultTag != "" {
-		detour, loaded := s.outbounds[s.defaultTag]
+		detour, loaded := outbounds[s.defaultTag]
 		if !loaded {
 			return E.New("default outbound not found: ", s.defaultTag)
 		}
@@ -104,24 +109,69 @@ func (s *Selector) Start() error {
 		return nil
 	}
 
-	s.selected.Store(s.outbounds[s.tags[0]])
+	s.selected.Store(outbounds[s.tags[0]])
 	return nil
 }
 
 func (s *Selector) Now() string {
 	selected := s.selected.Load()
 	if selected == nil {
+		s.access.RLock()
+		defer s.access.RUnlock()
 		return s.tags[0]
 	}
 	return selected.Tag()
 }
 
 func (s *Selector) All() []string {
+	s.access.RLock()
+	defer s.access.RUnlock()
 	return s.tags
 }
 
+// resolve 把 tag 表换成出站对象。任何一个找不到就整体失败，调用方据此保持原样。
+func (s *Selector) resolve(tags []string) (map[string]adapter.Outbound, error) {
+	outbounds := make(map[string]adapter.Outbound, len(tags))
+	for i, tag := range tags {
+		detour, loaded := s.outbound.Outbound(tag)
+		if !loaded {
+			return nil, E.New("outbound ", i, " not found: ", tag)
+		}
+		outbounds[tag] = detour
+	}
+	return outbounds, nil
+}
+
+// SetMembers 实现 adapter.DynamicOutboundGroup。
+//
+// 刻意不调 interruptGroup.Interrupt：换成员不是换选择，正在走本组的连接没有任何理由
+// 被打断。只有当选中的那个节点自己从组里消失时才需要另选一个,而那时它的连接本来就
+// 已经随着出站被摘掉而结束了。
+func (s *Selector) SetMembers(tags []string) error {
+	if len(tags) == 0 {
+		return E.New("refusing to leave group[", s.Tag(), "] with no members")
+	}
+	// 先在锁外解析：出站管理器有自己的锁，拿着本组的锁去调它是自找死锁。
+	outbounds, err := s.resolve(tags)
+	if err != nil {
+		return err
+	}
+
+	s.access.Lock()
+	s.tags = tags
+	s.outbounds = outbounds
+	s.access.Unlock()
+
+	if selected := s.selected.Load(); selected == nil || outbounds[selected.Tag()] == nil {
+		s.selected.Store(outbounds[tags[0]])
+	}
+	return nil
+}
+
 func (s *Selector) SelectOutbound(tag string) bool {
+	s.access.RLock()
 	detour, loaded := s.outbounds[tag]
+	s.access.RUnlock()
 	if !loaded {
 		return false
 	}
