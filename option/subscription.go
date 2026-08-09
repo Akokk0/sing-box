@@ -20,6 +20,12 @@ type Subscription struct {
 	// DownloadDetour 指定用哪个出站去拉订阅。留空表示直连——sing-box 起不来的时候
 	// 更新订阅是唯一的自救手段，这时候再绕回自己就是死锁。
 	DownloadDetour string `json:"download_detour,omitempty"`
+	// DownloadTimeout 是单次拉取的时限，默认 30 秒。
+	//
+	// 不能没有：更新循环是单个 goroutine，一次挂住的请求会把它永久钉在那里，
+	// 从此不再更新，且一条日志都不会打。机场故障或被墙时正是这个样子——TCP 握得上，
+	// 数据一个字节都不来。
+	DownloadTimeout badoption.Duration `json:"download_timeout,omitempty"`
 	// Path 是本地存档：启动时先用它把节点立刻装上，再去拉新的。
 	// 路由器开机时网络往往还没通，而这份订阅正是连上网所需要的东西。
 	Path string `json:"path,omitempty"`

@@ -20,6 +20,10 @@ import (
 	"github.com/sagernet/sing/service"
 )
 
+// defaultDownloadTimeout 是单次拉取的默认时限。路由器的上行往往很慢，给得比
+// 一般的 HTTP 请求宽一些。
+const defaultDownloadTimeout = 30 * time.Second
+
 var _ adapter.Subscription = (*Subscription)(nil)
 
 // Subscription 是一份订阅。
@@ -32,6 +36,7 @@ type Subscription struct {
 	outbound   adapter.OutboundManager
 	options    option.Subscription
 	interval   time.Duration
+	timeout    time.Duration
 	httpClient *http.Client
 	// onUpdated 在节点集合变化之后通知管理器去重算各个组的成员。
 	onUpdated func()
@@ -61,6 +66,10 @@ func New(ctx context.Context, router adapter.Router, logFactory log.Factory, opt
 	if interval < time.Minute {
 		return nil, E.New("subscription[", options.Tag, "]: interval must be at least 1m")
 	}
+	timeout := time.Duration(options.DownloadTimeout)
+	if timeout == 0 {
+		timeout = defaultDownloadTimeout
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	return &Subscription{
 		ctx:        ctx,
@@ -71,6 +80,7 @@ func New(ctx context.Context, router adapter.Router, logFactory log.Factory, opt
 		outbound:   service.FromContext[adapter.OutboundManager](ctx),
 		options:    options,
 		interval:   interval,
+		timeout:    timeout,
 		onUpdated:  onUpdated,
 	}, nil
 }
@@ -138,7 +148,11 @@ func (s *Subscription) loop() {
 
 // Update 拉一次订阅并应用。
 func (s *Subscription) Update() error {
-	request, err := http.NewRequestWithContext(s.ctx, http.MethodGet, s.options.URL, nil)
+	// 超时挂在这次请求上，而不是 http.Client 上：Client 的 Timeout 会把读 body 也算进去，
+	// 但它是给所有请求共用的，改起来影响面更大。
+	ctx, cancel := context.WithTimeout(s.ctx, s.timeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, s.options.URL, nil)
 	if err != nil {
 		return err
 	}

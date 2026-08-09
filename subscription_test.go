@@ -648,3 +648,69 @@ func TestSubscriptionFetchesWithoutRoutingThroughItself(t *testing.T) {
 	require.True(t, loaded)
 	require.Equal(t, []string{"🇭🇰 Hong Kong 01"}, outbound.(adapter.OutboundGroup).All())
 }
+
+// startHangingServer 起一个只接受连接、永远不回应的 HTTP 服务。机场故障或被墙时
+// 就是这个样子：TCP 握得上，数据一个字节都不来。
+func startHangingServer(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		var held []net.Conn
+		defer func() {
+			for _, conn := range held {
+				_ = conn.Close()
+			}
+		}()
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			// 收下就不管了，也不关——关掉的话客户端会立刻拿到 EOF，就测不到卡死了。
+			held = append(held, conn)
+		}
+	}()
+	return "http://" + listener.Addr().String() + "/sub"
+}
+
+// 拉取必须有超时，否则一个不应答的机场能把整个 sing-box 钉死。
+//
+// 首次启动没有本地存档时，Start() 会同步调一次 Update()——请求不返回，Start() 就不返回，
+// box.Start() 也就不返回。路由器上的表现是服务起不来、全网断，而且不打任何日志。
+// 摘掉本用例守着的那行超时，这个测试进程本身也会挂死（验证过）。
+//
+// 起来之后的风险稍轻但同样致命：更新循环是单个 goroutine，一次挂住的请求会把它永久
+// 钉在那里，从此不再更新订阅，表面上却一切正常。
+func TestSubscriptionUpdateGivesUpOnAServerThatNeverAnswers(t *testing.T) {
+	instance, ctx := startBox(t, option.Options{
+		Subscriptions: []option.Subscription{{
+			Tag:             "airport",
+			URL:             startHangingServer(t),
+			DownloadTimeout: badoption.Duration(500 * time.Millisecond),
+		}},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "direct"},
+			{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport"},
+			}},
+		},
+	})
+	_ = instance
+
+	manager := service.FromContext[adapter.SubscriptionManager](ctx)
+	airport, found := manager.Subscription("airport")
+	require.True(t, found)
+
+	done := make(chan error, 1)
+	go func() { done <- airport.Update() }()
+	select {
+	case err := <-done:
+		require.Error(t, err, "Update returned success from a server that never answered")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Update never returned — the update loop would be dead from here on")
+	}
+}
