@@ -19,28 +19,31 @@ import (
 var _ adapter.OutboundManager = (*Manager)(nil)
 
 type Manager struct {
-	logger                  log.ContextLogger
-	registry                adapter.OutboundRegistry
-	endpoint                adapter.EndpointManager
-	defaultTag              string
-	access                  sync.RWMutex
-	started                 bool
-	stage                   adapter.StartStage
-	outbounds               []adapter.Outbound
-	outboundByTag           map[string]adapter.Outbound
-	dependByTag             map[string][]string
-	defaultOutbound         adapter.Outbound
+	logger          log.ContextLogger
+	registry        adapter.OutboundRegistry
+	endpoint        adapter.EndpointManager
+	defaultTag      string
+	access          sync.RWMutex
+	started         bool
+	stage           adapter.StartStage
+	outbounds       []adapter.Outbound
+	outboundByTag   map[string]adapter.Outbound
+	dependByTag     map[string][]string
+	defaultOutbound adapter.Outbound
+	// retiringOutbounds 是被换掉、但还有连接没走完的旧出站。
+	retiringOutbounds       map[*trackedOutbound]string
 	defaultOutboundFallback func() (adapter.Outbound, error)
 }
 
 func NewManager(logger logger.ContextLogger, registry adapter.OutboundRegistry, endpoint adapter.EndpointManager, defaultTag string) *Manager {
 	return &Manager{
-		logger:        logger,
-		registry:      registry,
-		endpoint:      endpoint,
-		defaultTag:    defaultTag,
-		outboundByTag: make(map[string]adapter.Outbound),
-		dependByTag:   make(map[string][]string),
+		logger:            logger,
+		registry:          registry,
+		endpoint:          endpoint,
+		defaultTag:        defaultTag,
+		outboundByTag:     make(map[string]adapter.Outbound),
+		dependByTag:       make(map[string][]string),
+		retiringOutbounds: make(map[*trackedOutbound]string),
 	}
 }
 
@@ -175,7 +178,17 @@ func (m *Manager) Close() error {
 	m.started = false
 	outbounds := m.outbounds
 	m.outbounds = nil
+	// 退役中的出站已经不在 m.outbounds 里了。关停时必须一并收掉，否则它们和自己的
+	// 后台协程会一直留到进程结束。
+	retiring := make([]*trackedOutbound, 0, len(m.retiringOutbounds))
+	for outbound := range m.retiringOutbounds {
+		retiring = append(retiring, outbound)
+	}
+	m.retiringOutbounds = make(map[*trackedOutbound]string)
 	m.access.Unlock()
+	for _, outbound := range retiring {
+		_ = outbound.Close()
+	}
 	var err error
 	for _, outbound := range outbounds {
 		if closer, isCloser := outbound.(io.Closer); isCloser {
@@ -279,6 +292,93 @@ func (m *Manager) UpdateDependencies(tag string, dependencies []string) error {
 	}
 	for _, dependency := range dependencies {
 		m.dependByTag[dependency] = append(m.dependByTag[dependency], tag)
+	}
+	return nil
+}
+
+// Retiring 实现 adapter.DynamicOutboundManager，返回还在等连接走完的出站 tag。
+func (m *Manager) Retiring() []string {
+	m.access.RLock()
+	defer m.access.RUnlock()
+	tags := make([]string, 0, len(m.retiringOutbounds))
+	for _, tag := range m.retiringOutbounds {
+		tags = append(tags, tag)
+	}
+	return tags
+}
+
+func (m *Manager) forgetRetired(outbound *trackedOutbound) {
+	m.access.Lock()
+	delete(m.retiringOutbounds, outbound)
+	m.access.Unlock()
+}
+
+// Replace 实现 adapter.DynamicOutboundManager。
+//
+// 跟 Create 的区别只在被顶掉的那一个身上：Create 当场 common.Close 掉它，走着它的连接
+// 全部瞬间死掉；Replace 让它退役——新连接一律走新的，旧的等自己最后一条连接结束才关。
+// 机场只是改了某个节点的服务器或密码时,用户手里的游戏、下载、SSH 因此不会断。
+//
+// 只有经由 Replace 建出来的出站才数得清自己身上有多少条连接。被顶掉的若是配置里建的
+// 那种,数不出来,只能照旧立刻关掉。
+func (m *Manager) Replace(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, outboundType string, options any) error {
+	if tag == "" {
+		return os.ErrInvalid
+	}
+	created, err := m.registry.CreateOutbound(ctx, router, logger, tag, outboundType, options)
+	if err != nil {
+		return err
+	}
+	outbound := newTrackedOutbound(created, nil)
+	outbound.onRetired = func() { m.forgetRetired(outbound) }
+
+	if m.started {
+		name := "outbound/" + outbound.Type() + "[" + tag + "]"
+		for _, stage := range adapter.ListStartStages {
+			done := adapter.LogElapsed(m.logger, stage, " ", name)
+			err = adapter.LegacyStart(outbound, stage)
+			done()
+			if err != nil {
+				return E.Cause(err, stage, " ", name)
+			}
+		}
+	}
+
+	m.access.Lock()
+	previous, replaced := m.outboundByTag[tag]
+	if replaced {
+		index := common.Index(m.outbounds, func(it adapter.Outbound) bool {
+			return it == previous
+		})
+		if index != -1 {
+			m.outbounds = append(m.outbounds[:index], m.outbounds[index+1:]...)
+		}
+	}
+	m.outbounds = append(m.outbounds, outbound)
+	m.outboundByTag[tag] = outbound
+	for _, dependency := range outbound.Dependencies() {
+		m.dependByTag[dependency] = append(m.dependByTag[dependency], tag)
+	}
+	if m.defaultOutbound == previous || tag == m.defaultTag || (m.defaultTag == "" && m.defaultOutbound == nil) {
+		m.defaultOutbound = outbound
+	}
+	previousTracked, wasTracked := previous.(*trackedOutbound)
+	if replaced && wasTracked && m.started {
+		m.retiringOutbounds[previousTracked] = tag
+	}
+	m.access.Unlock()
+
+	if !replaced {
+		return nil
+	}
+	if wasTracked && m.started {
+		// 必须在锁外：连接早已走完时 retire 会同步回调 forgetRetired，那里还要拿这把锁。
+		previousTracked.retire()
+	} else {
+		err = common.Close(previous)
+		if err != nil {
+			return E.Cause(err, "close outbound/", previous.Type(), "[", tag, "]")
+		}
 	}
 	return nil
 }

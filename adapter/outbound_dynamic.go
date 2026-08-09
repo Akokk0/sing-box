@@ -1,5 +1,11 @@
 package adapter
 
+import (
+	"context"
+
+	"github.com/sagernet/sing-box/log"
+)
+
 // DynamicOutboundGroup 是成员可以在运行中变化的策略组。
 //
 // 订阅更新会增删节点，组必须跟着变。但组本身绝不能因此被重建——重建会打断正在走它的
@@ -25,4 +31,12 @@ type DynamicOutboundManager interface {
 	OutboundManager
 	// UpdateDependencies 把 tag 这个出站依赖的对象整体换成 dependencies。
 	UpdateDependencies(tag string, dependencies []string) error
+
+	// Replace 用新配置换掉一个出站，被顶掉的那个进入退役状态：新连接一律走新的，
+	// 旧的等自己最后一条连接结束之后才被关闭。Create 在同样的场景下会当场关掉旧的,
+	// 把正在走它的连接全部打断。
+	Replace(ctx context.Context, router Router, logger log.ContextLogger, tag string, outboundType string, options any) error
+
+	// Retiring 返回还在等连接走完的出站 tag。
+	Retiring() []string
 }

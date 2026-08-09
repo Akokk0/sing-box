@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -14,6 +15,8 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common"
+	"github.com/sagernet/sing/common/json/badoption"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 )
@@ -122,12 +125,13 @@ func startEchoServer(t *testing.T) string {
 // roundTrip 在连接上写一句再读回来，读不回原样就说明这条连接已经断了。
 func roundTrip(t *testing.T, conn net.Conn, message string) {
 	t.Helper()
-	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
-		t.Fatalf("set deadline: %v", err)
-	}
+	// 出站默认返回「早连接」：握手要到第一次写才发生，在那之前底下还没有真连接，
+	// SetDeadline 会报 invalid argument。所以设两次，第一次尽力而为，写完那次才作数。
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
 	if _, err := conn.Write([]byte(message)); err != nil {
 		t.Fatalf("write %q: %v", message, err)
 	}
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
 	buffer := make([]byte, len(message))
 	if _, err := io.ReadFull(conn, buffer); err != nil {
 		t.Fatalf("read back %q: %v", message, err)
@@ -307,4 +311,123 @@ func TestURLTestStopsSelectingARemovedMember(t *testing.T) {
 	if members := group.All(); len(members) != 1 || members[0] != survivor {
 		t.Errorf("All() = %v, want [%s]", members, survivor)
 	}
+}
+
+// waitFor 轮询等一个条件成立，超时即失败。
+func waitFor(t *testing.T, what string, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+// startShadowsocksServer 起一个 shadowsocks 服务端，返回它的监听端口。
+//
+// 测试退役必须用一个「关掉出站会真的打断连接」的协议。direct 不行——它只是个 dialer，
+// Close 之后已经建立的 TCP 连接照样跑，断言就成了空的。shadowsocks 开 multiplex 之后
+// 出站的 Close 会撕掉整条 mux 会话（protocol/shadowsocks/outbound.go:139），隧道里的
+// 流当场全断，正是我们要防住的那种断法。而且它不需要证书。
+func startShadowsocksServer(t *testing.T) uint16 {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a port: %v", err)
+	}
+	port := uint16(listener.Addr().(*net.TCPAddr).Port)
+	_ = listener.Close()
+
+	startBox(t, option.Options{
+		Inbounds: []option.Inbound{{
+			Type: C.TypeShadowsocks,
+			Tag:  "ss-in",
+			Options: &option.ShadowsocksInboundOptions{
+				ListenOptions: option.ListenOptions{
+					Listen:     common.Ptr(badoption.Addr(netip.AddrFrom4([4]byte{127, 0, 0, 1}))),
+					ListenPort: port,
+				},
+				Method:    shadowsocksMethod,
+				Password:  shadowsocksPassword,
+				Multiplex: &option.InboundMultiplexOptions{Enabled: true},
+			},
+		}},
+		Outbounds: []option.Outbound{{Type: C.TypeDirect, Tag: "direct"}},
+	})
+	return port
+}
+
+const (
+	shadowsocksMethod   = "chacha20-ietf-poly1305"
+	shadowsocksPassword = "test-only-not-a-real-secret"
+)
+
+func shadowsocksNode(port uint16) *option.ShadowsocksOutboundOptions {
+	return &option.ShadowsocksOutboundOptions{
+		ServerOptions: option.ServerOptions{Server: "127.0.0.1", ServerPort: port},
+		Method:        shadowsocksMethod,
+		Password:      shadowsocksPassword,
+		// mux 是关键：出站被关掉时整条会话一起断，隧道里的流全部阵亡。
+		// 明确选 yamux：默认的 h2mux 在 sing-mux v0.3.5 里自己带一个数据竞争
+		// （h2mux_conn.go 的 setup 与 Read 之间），-race 下跑不了。
+		Multiplex: &option.OutboundMultiplexOptions{Enabled: true, Protocol: "yamux"},
+	}
+}
+
+// 机场改了某个节点的服务器地址或密码——节点名没变，但底下换了东西。
+//
+// 新连接必须走新的；而正在走旧节点的那条连接不能断，用户可能正在游戏里。旧出站要等
+// 自己的连接全部结束之后才真正被关掉。
+//
+// OutboundManager.Create 做不到这件事：同 tag 覆盖时它当场 common.Close 掉旧对象
+// （adapter/outbound/manager.go），会话被撕掉，走着它的连接全部瞬间死掉。
+func TestReplacingANodeRetiresItGracefully(t *testing.T) {
+	echoAddress := startEchoServer(t)
+	serverPort := startShadowsocksServer(t)
+	instance, ctx := startBox(t, option.Options{
+		Outbounds: []option.Outbound{{Type: C.TypeDirect, Tag: "default"}},
+	})
+	manager, dynamic := instance.Outbound().(adapter.DynamicOutboundManager)
+	if !dynamic {
+		t.Fatalf("outbound manager cannot retire outbounds: %T", instance.Outbound())
+	}
+	newNode := func() error {
+		return manager.Replace(ctx, instance.Router(),
+			instance.LogFactory().NewLogger("outbound/shadowsocks[node]"),
+			"node", C.TypeShadowsocks, shadowsocksNode(serverPort))
+	}
+
+	if err := newNode(); err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	original, _ := manager.Outbound("node")
+
+	conn, err := original.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddr(echoAddress))
+	if err != nil {
+		t.Fatalf("dial through node: %v", err)
+	}
+	defer conn.Close()
+	roundTrip(t, conn, "before the node changed")
+
+	// 机场改了这个节点的参数。
+	if err = newNode(); err != nil {
+		t.Fatalf("replace node: %v", err)
+	}
+
+	if current, _ := manager.Outbound("node"); current == original {
+		t.Error("the manager still hands out the old outbound, new connections would keep using it")
+	}
+	roundTrip(t, conn, "survived the node being replaced")
+	if retiring := manager.Retiring(); len(retiring) != 1 || retiring[0] != "node" {
+		t.Errorf("Retiring() = %v, want [node] while the old connection is still open", retiring)
+	}
+
+	// 连接结束，退役才完成。
+	_ = conn.Close()
+	waitFor(t, "the retired outbound to be released", func() bool {
+		return len(manager.Retiring()) == 0
+	})
 }
