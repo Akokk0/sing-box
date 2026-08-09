@@ -17,43 +17,59 @@ import (
 // 对外一律沿用 Clash 的 provider 叫法——/providers/proxies 是 Clash 的既定接口，
 // 面板照着它请求，改成 subscriptions 只会让所有面板都认不出来。配置里叫 subscription、
 // API 上叫 provider，这层的职责就是把两边对上。
-func proxyProviderRouter(ctx context.Context) http.Handler {
+func proxyProviderRouter(server *Server, ctx context.Context) http.Handler {
 	r := chi.NewRouter()
-	r.Get("/", getProviders(ctx))
+	r.Get("/", getProviders(server, ctx))
 
 	r.Route("/{name}", func(r chi.Router) {
 		r.Use(parseProviderName, findProviderByName(ctx))
-		r.Get("/", getProvider)
+		r.Get("/", getProvider(server))
 		r.Put("/", updateProvider)
 		r.Get("/healthcheck", healthCheckProvider)
 	})
 	return r
 }
 
-func providerInfo(provider adapter.Subscription) render.M {
+// providerInfo 里的 proxies 必须是完整的 proxy 对象,和 /proxies 给出的形状一致——
+// 面板要靠每个对象的 name / type / history 才画得出那一列。填一串裸 tag 字符串的话，
+// 面板读 proxy.name 得到 undefined，provider 卡片在、里面一个节点都显示不出来。
+func providerInfo(server *Server, provider adapter.Subscription) render.M {
+	nodes := provider.Nodes()
+	proxies := make([]any, 0, len(nodes))
+	for _, tag := range nodes {
+		detour, loaded := server.outbound.Outbound(tag)
+		if !loaded {
+			// 订阅刚换过一轮、出站还没跟上时会短暂出现。少画一个节点即可，
+			// 不该让整个面板拿不到列表。
+			continue
+		}
+		proxies = append(proxies, proxyInfo(server, detour))
+	}
 	return render.M{
 		"name":        provider.Tag(),
 		"type":        "Proxy",
 		"vehicleType": "HTTP",
-		"proxies":     provider.Nodes(),
+		"proxies":     proxies,
 	}
 }
 
-func getProviders(ctx context.Context) func(w http.ResponseWriter, r *http.Request) {
+func getProviders(server *Server, ctx context.Context) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		providers := render.M{}
 		if manager := service.FromContext[adapter.SubscriptionManager](ctx); manager != nil {
 			for _, provider := range manager.Subscriptions() {
-				providers[provider.Tag()] = providerInfo(provider)
+				providers[provider.Tag()] = providerInfo(server, provider)
 			}
 		}
 		render.JSON(w, r, render.M{"providers": providers})
 	}
 }
 
-func getProvider(w http.ResponseWriter, r *http.Request) {
-	provider := r.Context().Value(CtxKeyProvider).(adapter.Subscription)
-	render.JSON(w, r, providerInfo(provider))
+func getProvider(server *Server) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		provider := r.Context().Value(CtxKeyProvider).(adapter.Subscription)
+		render.JSON(w, r, providerInfo(server, provider))
+	}
 }
 
 func updateProvider(w http.ResponseWriter, r *http.Request) {
