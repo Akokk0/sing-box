@@ -200,6 +200,9 @@ func (s *Subscription) Update() error {
 	if err != nil {
 		return err
 	}
+	if s.options.UserAgent != "" {
+		request.Header.Set("User-Agent", s.options.UserAgent)
+	}
 	response, err := s.httpClient.Do(request)
 	if err != nil {
 		return err

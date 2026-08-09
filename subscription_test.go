@@ -944,3 +944,39 @@ func TestSubscriptionRefreshesEvenWhenTheArchiveSuppliedNodes(t *testing.T) {
 	proxy, _ := instance.Outbound().Outbound("proxy")
 	require.ElementsMatch(t, []string{"HK 01", "JP 01"}, proxy.(adapter.OutboundGroup).All())
 }
+
+// 机场常按 User-Agent 决定返回什么格式：认出 clash 就给 clash yaml，认出别的客户端
+// 就给别的。默认不设,保持 Go 自己的 UA——一旦换了个挑 UA 的机场,得有地方能改,
+// 否则只能改代码重编。
+func TestSubscriptionSendsTheConfiguredUserAgent(t *testing.T) {
+	seen := make(chan string, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case seen <- r.Header.Get("User-Agent"):
+		default:
+		}
+		_, _ = w.Write([]byte("proxies:\n" + node("HK 01", 10001)))
+	}))
+	t.Cleanup(server.Close)
+
+	startBox(t, option.Options{
+		Subscriptions: []option.Subscription{{
+			Tag:       "airport",
+			URL:       server.URL,
+			UserAgent: "clash.meta/1.19.0",
+		}},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "direct"},
+			{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport"},
+			}},
+		},
+	})
+
+	select {
+	case agent := <-seen:
+		require.Equal(t, "clash.meta/1.19.0", agent)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the subscription was never fetched")
+	}
+}

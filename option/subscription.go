@@ -26,6 +26,12 @@ type Subscription struct {
 	// 从此不再更新，且一条日志都不会打。机场故障或被墙时正是这个样子——TCP 握得上，
 	// 数据一个字节都不来。
 	DownloadTimeout badoption.Duration `json:"download_timeout,omitempty"`
+	// UserAgent 是拉订阅时发的 User-Agent。留空则用 Go 的默认值。
+	//
+	// 机场常按这个头决定返回什么格式：认出 clash 就给 clash yaml，认出别的客户端就给
+	// 别的。默认刻意不改——正在工作的机场很可能就是因为没认出我们才给的 clash yaml，
+	// 报上名号反而可能换来一份我们解析不了的东西。换了挑 UA 的机场时再设这一项。
+	UserAgent string `json:"user_agent,omitempty"`
 	// Path 是本地存档：启动时先用它把节点立刻装上，再去拉新的。
 	// 路由器开机时网络往往还没通，而这份订阅正是连上网所需要的东西。
 	Path string `json:"path,omitempty"`
