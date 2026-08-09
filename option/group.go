@@ -3,12 +3,20 @@ package option
 import "github.com/sagernet/sing/common/json/badoption"
 
 type SelectorOutboundOptions struct {
-	Outbounds                 []string `json:"outbounds" reference:"outbound"`
-	Default                   string   `json:"default,omitempty" reference:"outbound"`
-	InterruptExistConnections bool     `json:"interrupt_exist_connections,omitempty"`
+	// Providers 让本组的成员来自这几份订阅，而不是写死在配置里。
+	Providers []string `json:"providers,omitempty"`
+	// Filter 从那些节点里挑出本组的成员，按声明顺序应用。
+	Filter                    []GroupFilter `json:"filter,omitempty"`
+	Outbounds                 []string      `json:"outbounds" reference:"outbound"`
+	Default                   string        `json:"default,omitempty" reference:"outbound"`
+	InterruptExistConnections bool          `json:"interrupt_exist_connections,omitempty"`
 }
 
 type URLTestOutboundOptions struct {
+	// Providers 让本组的成员来自这几份订阅，而不是写死在配置里。
+	Providers []string `json:"providers,omitempty"`
+	// Filter 从那些节点里挑出本组的成员，按声明顺序应用。
+	Filter                    []GroupFilter      `json:"filter,omitempty"`
 	Outbounds                 []string           `json:"outbounds" reference:"outbound"`
 	URL                       string             `json:"url,omitempty"`
 	Interval                  badoption.Duration `json:"interval,omitempty"`

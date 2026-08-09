@@ -14,6 +14,7 @@ import (
 	"github.com/sagernet/sing-box/adapter/endpoint"
 	"github.com/sagernet/sing-box/adapter/inbound"
 	"github.com/sagernet/sing-box/adapter/outbound"
+	"github.com/sagernet/sing-box/adapter/provider"
 	boxService "github.com/sagernet/sing-box/adapter/service"
 	"github.com/sagernet/sing-box/common/certificate"
 	"github.com/sagernet/sing-box/common/dialer"
@@ -364,6 +365,16 @@ func New(options Options) (*Box, error) {
 		if err != nil {
 			return nil, E.Cause(err, "initialize outbound[", i, "]")
 		}
+	}
+	if len(options.OutboundProviders) > 0 {
+		// provider 要往出站管理器里塞节点、还要改策略组，所以它的 Start 只在
+		// StartStateStarted 阶段动手——那时所有出站都已经起来了。
+		providerManager, err := provider.NewManager(ctx, logFactory, router, options.OutboundProviders)
+		if err != nil {
+			return nil, err
+		}
+		service.MustRegister[adapter.OutboundProviderManager](ctx, providerManager)
+		internalServices = append(internalServices, providerManager)
 	}
 	for i, certificateProviderOptions := range options.CertificateProviders {
 		var tag string

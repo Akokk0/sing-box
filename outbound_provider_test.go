@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +21,9 @@ import (
 	"github.com/sagernet/sing/common/json/badoption"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/service"
+
+	"github.com/stretchr/testify/require"
 )
 
 // startBox 在进程内起一个真箱子。这些行为只有在完整装配起来之后才成立——策略组、
@@ -517,4 +522,104 @@ func reservePort(t *testing.T) uint16 {
 	port := uint16(listener.Addr().(*net.TCPAddr).Port)
 	_ = listener.Close()
 	return port
+}
+
+// 订阅内容随测试变化：改完再 Update 一次，验证节点增删真的落到组里。
+type subscriptionServer struct {
+	access  sync.Mutex
+	content string
+	url     string
+}
+
+func startSubscriptionServer(t *testing.T, content string) *subscriptionServer {
+	t.Helper()
+	subscription := &subscriptionServer{content: content}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		subscription.access.Lock()
+		defer subscription.access.Unlock()
+		_, _ = w.Write([]byte(subscription.content))
+	}))
+	t.Cleanup(server.Close)
+	subscription.url = server.URL
+	return subscription
+}
+
+func (s *subscriptionServer) serve(content string) {
+	s.access.Lock()
+	defer s.access.Unlock()
+	s.content = content
+}
+
+func node(name string, port int) string {
+	return "  - name: \"" + name + "\"\n" +
+		"    type: ss\n" +
+		"    server: 127.0.0.1\n" +
+		"    port: " + strconv.Itoa(port) + "\n" +
+		"    cipher: chacha20-ietf-poly1305\n" +
+		"    password: FAKE-PASSWORD-NOT-REAL\n"
+}
+
+// 整条链：sing-box 自己拉订阅、把 proxies 转成出站、按 filter 分配给策略组，
+// 全程不重启进程、不重写配置文件。
+func TestOutboundProviderDrivesGroupMembership(t *testing.T) {
+	subscription := startSubscriptionServer(t, "proxies:\n"+
+		// 机场把流量信息也伪装成节点排在最前面，它绝不能进任何组。
+		node("Traffic Reset：4 Days Left", 10001)+
+		node("🇭🇰 Hong Kong 01", 10002)+
+		node("🇯🇵 Japan 01", 10003))
+
+	instance, ctx := startBox(t, option.Options{
+		OutboundProviders: []option.OutboundProvider{{
+			Tag: "airport",
+			URL: subscription.url,
+		}},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "direct"},
+			{Type: C.TypeSelector, Tag: "🐉 HK", Options: &option.SelectorOutboundOptions{
+				Providers: []string{"airport"},
+				Filter: []option.GroupFilter{
+					{Action: "include", Keywords: []string{"🇭🇰|HK|香港"}},
+				},
+			}},
+			{Type: C.TypeSelector, Tag: "🚀 ALL", Options: &option.SelectorOutboundOptions{
+				Providers: []string{"airport"},
+				Filter: []option.GroupFilter{
+					{Action: "exclude", Keywords: []string{"Traffic|Expire|Days Left"}},
+				},
+			}},
+		},
+	})
+
+	groupMembers := func(tag string) []string {
+		outbound, loaded := instance.Outbound().Outbound(tag)
+		if !loaded {
+			t.Fatalf("no group tagged %q", tag)
+		}
+		return outbound.(adapter.OutboundGroup).All()
+	}
+
+	// 箱子起来的时候订阅已经拉过并应用了。
+	require.Equal(t, []string{"🇭🇰 Hong Kong 01"}, groupMembers("🐉 HK"))
+	require.Equal(t, []string{"🇭🇰 Hong Kong 01", "🇯🇵 Japan 01"}, groupMembers("🚀 ALL"))
+	// 节点本身也真的成了出站。
+	_, loaded := instance.Outbound().Outbound("🇯🇵 Japan 01")
+	require.True(t, loaded)
+
+	// 机场加了一个香港节点，撤掉了日本那个。
+	subscription.serve("proxies:\n" +
+		node("Traffic Reset：3 Days Left", 10001) +
+		node("🇭🇰 Hong Kong 01", 10002) +
+		node("🇭🇰 Hong Kong 02", 10004))
+
+	providerManager := service.FromContext[adapter.OutboundProviderManager](ctx)
+	require.NotNil(t, providerManager)
+	airport, found := providerManager.Provider("airport")
+	require.True(t, found)
+	require.NoError(t, airport.Update())
+
+	require.Equal(t, []string{"🇭🇰 Hong Kong 01", "🇭🇰 Hong Kong 02"}, groupMembers("🐉 HK"))
+	require.Equal(t, []string{"🇭🇰 Hong Kong 01", "🇭🇰 Hong Kong 02"}, groupMembers("🚀 ALL"))
+	// 撤掉的节点也从出站管理器里摘干净了，否则会一直挂在那儿占着资源。
+	_, loaded = instance.Outbound().Outbound("🇯🇵 Japan 01")
+	require.False(t, loaded)
 }

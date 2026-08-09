@@ -31,6 +31,7 @@ func RegisterURLTest(registry *outbound.Registry) {
 var (
 	_ adapter.OutboundGroup           = (*URLTest)(nil)
 	_ adapter.DynamicOutboundGroup    = (*URLTest)(nil)
+	_ adapter.ProviderOutboundGroup   = (*URLTest)(nil)
 	_ adapter.InterfaceUpdateListener = (*URLTest)(nil)
 )
 
@@ -42,6 +43,8 @@ type URLTest struct {
 	logger                       log.ContextLogger
 	access                       sync.RWMutex
 	tags                         []string
+	providers                    []string
+	filter                       []option.GroupFilter
 	link                         string
 	interval                     time.Duration
 	tolerance                    uint16
@@ -58,13 +61,15 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
 		connection:                   service.FromContext[adapter.ConnectionManager](ctx),
 		logger:                       logger,
 		tags:                         options.Outbounds,
+		providers:                    options.Providers,
+		filter:                       options.Filter,
 		link:                         options.URL,
 		interval:                     time.Duration(options.Interval),
 		tolerance:                    options.Tolerance,
 		idleTimeout:                  time.Duration(options.IdleTimeout),
 		interruptExternalConnections: options.InterruptExistConnections,
 	}
-	if len(outbound.tags) == 0 {
+	if len(outbound.tags) == 0 && len(outbound.providers) == 0 {
 		return nil, E.New("missing tags")
 	}
 	return outbound, nil
@@ -120,9 +125,6 @@ func (s *URLTest) All() []string {
 // 等到下一个 interval 才有资格被选中。用 force=false，已有历史的老节点会被跳过，
 // 所以代价只有新增的那几个。
 func (s *URLTest) SetMembers(tags []string) error {
-	if len(tags) == 0 {
-		return E.New("refusing to leave group[", s.Tag(), "] with no members")
-	}
 	// 先在锁外解析：出站管理器有自己的锁。
 	outbounds := make([]adapter.Outbound, 0, len(tags))
 	for i, tag := range tags {
@@ -143,6 +145,20 @@ func (s *URLTest) SetMembers(tags []string) error {
 	s.group.setOutbounds(outbounds)
 	go s.group.CheckOutbounds(false)
 	return nil
+}
+
+// ProviderTags 实现 adapter.ProviderOutboundGroup。
+func (s *URLTest) ProviderTags() []string {
+	return s.providers
+}
+
+// SetProviderNodes 实现 adapter.ProviderOutboundGroup：订阅变了之后重算本组成员。
+func (s *URLTest) SetProviderNodes(tags []string) error {
+	selected, err := FilterTags(tags, s.filter)
+	if err != nil {
+		return err
+	}
+	return s.SetMembers(selected)
 }
 
 func (s *URLTest) URLTest(ctx context.Context) (map[string]uint16, error) {

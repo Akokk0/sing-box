@@ -27,6 +27,7 @@ func RegisterSelector(registry *outbound.Registry) {
 var (
 	_ adapter.OutboundGroup           = (*Selector)(nil)
 	_ adapter.DynamicOutboundGroup    = (*Selector)(nil)
+	_ adapter.ProviderOutboundGroup   = (*Selector)(nil)
 	_ adapter.ConnectionHandler       = (*Selector)(nil)
 	_ adapter.PacketConnectionHandler = (*Selector)(nil)
 )
@@ -41,6 +42,8 @@ type Selector struct {
 	// 那是个原子值——换成员不该给每一次拨号都加上一把锁。
 	access                       sync.RWMutex
 	tags                         []string
+	providers                    []string
+	filter                       []option.GroupFilter
 	defaultTag                   string
 	outbounds                    map[string]adapter.Outbound
 	selected                     common.TypedValue[adapter.Outbound]
@@ -57,13 +60,15 @@ func NewSelector(ctx context.Context, router adapter.Router, logger log.ContextL
 		connection:                   service.FromContext[adapter.ConnectionManager](ctx),
 		logger:                       logger,
 		tags:                         options.Outbounds,
+		providers:                    options.Providers,
+		filter:                       options.Filter,
 		defaultTag:                   options.Default,
 		outbounds:                    make(map[string]adapter.Outbound),
 		history:                      service.PtrFromContext[urltest.HistoryStorage](ctx),
 		interruptGroup:               interrupt.NewGroup(),
 		interruptExternalConnections: options.InterruptExistConnections,
 	}
-	if len(outbound.tags) == 0 {
+	if len(outbound.tags) == 0 && len(outbound.providers) == 0 {
 		return nil, E.New("missing tags")
 	}
 	return outbound, nil
@@ -78,6 +83,10 @@ func (s *Selector) Network() []string {
 }
 
 func (s *Selector) Start() error {
+	// 成员来自订阅时，启动这一刻还一个都没有。provider 会在出站全部起来之后把它们送进来。
+	if len(s.tags) == 0 {
+		return nil
+	}
 	outbounds, err := s.resolve(s.tags)
 	if err != nil {
 		return err
@@ -118,6 +127,9 @@ func (s *Selector) Now() string {
 	if selected == nil {
 		s.access.RLock()
 		defer s.access.RUnlock()
+		if len(s.tags) == 0 {
+			return ""
+		}
 		return s.tags[0]
 	}
 	return selected.Tag()
@@ -148,9 +160,6 @@ func (s *Selector) resolve(tags []string) (map[string]adapter.Outbound, error) {
 // 被打断。只有当选中的那个节点自己从组里消失时才需要另选一个,而那时它的连接本来就
 // 已经随着出站被摘掉而结束了。
 func (s *Selector) SetMembers(tags []string) error {
-	if len(tags) == 0 {
-		return E.New("refusing to leave group[", s.Tag(), "] with no members")
-	}
 	// 先在锁外解析：出站管理器有自己的锁，拿着本组的锁去调它是自找死锁。
 	outbounds, err := s.resolve(tags)
 	if err != nil {
@@ -165,6 +174,12 @@ func (s *Selector) SetMembers(tags []string) error {
 		return err
 	}
 
+	if len(tags) == 0 {
+		// filter 一个都没匹配上，或者机场把这批节点全撤了。留着旧成员更糟——那些出站
+		// 已经被摘掉了。空着并在拨号时明确报错，比悄悄打到死节点上强。
+		s.selected.Store(nil)
+		return nil
+	}
 	// 选中的那个可能：还在（但对象被换成了新的）、彻底没了、或者还没选过。
 	// 只按 tag 判断在不在是不够的——节点被替换时 tag 一个字没变，而指针必须换。
 	switch selected := s.selected.Load(); {
@@ -205,7 +220,11 @@ func (s *Selector) SelectOutbound(tag string) bool {
 }
 
 func (s *Selector) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-	conn, err := s.selected.Load().DialContext(ctx, network, destination)
+	selected := s.selected.Load()
+	if selected == nil {
+		return nil, E.New("group[", s.Tag(), "] has no members")
+	}
+	conn, err := selected.DialContext(ctx, network, destination)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +232,11 @@ func (s *Selector) DialContext(ctx context.Context, network string, destination 
 }
 
 func (s *Selector) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
-	conn, err := s.selected.Load().ListenPacket(ctx, destination)
+	selected := s.selected.Load()
+	if selected == nil {
+		return nil, E.New("group[", s.Tag(), "] has no members")
+	}
+	conn, err := selected.ListenPacket(ctx, destination)
 	if err != nil {
 		return nil, err
 	}
@@ -238,6 +261,20 @@ func (s *Selector) NewPacketConnection(ctx context.Context, conn N.PacketConn, m
 	} else {
 		s.connection.NewPacketConnection(ctx, selected, conn, metadata, onClose)
 	}
+}
+
+// ProviderTags 实现 adapter.ProviderOutboundGroup。
+func (s *Selector) ProviderTags() []string {
+	return s.providers
+}
+
+// SetProviderNodes 实现 adapter.ProviderOutboundGroup：订阅变了之后重算本组成员。
+func (s *Selector) SetProviderNodes(tags []string) error {
+	selected, err := FilterTags(tags, s.filter)
+	if err != nil {
+		return err
+	}
+	return s.SetMembers(selected)
 }
 
 func RealTag(detour adapter.Outbound) string {

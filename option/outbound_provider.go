@@ -20,6 +20,9 @@ type OutboundProvider struct {
 	// DownloadDetour 指定用哪个出站去拉订阅。留空表示直连——sing-box 起不来的时候
 	// 更新订阅是唯一的自救手段，这时候再绕回自己就是死锁。
 	DownloadDetour string `json:"download_detour,omitempty"`
+	// Path 是本地存档：启动时先用它把节点立刻装上，再去拉新的。
+	// 路由器开机时网络往往还没通，而这份订阅正是连上网所需要的东西。
+	Path string `json:"path,omitempty"`
 	// ExcludeSkipped 为真时，转不了的节点连名字都不记。默认会留下名字：机场换协议时
 	// 节点悄悄少一批却看不见，事后无从查起。
 	ExcludeSkipped bool `json:"exclude_skipped,omitempty"`
