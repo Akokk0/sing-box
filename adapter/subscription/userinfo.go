@@ -22,7 +22,7 @@ const userInfoHeader = "subscription-userinfo"
 func parseUserInfo(header string) *adapter.SubscriptionInfo {
 	var info adapter.SubscriptionInfo
 	var found bool
-	for _, field := range strings.Split(header, ";") {
+	for field := range strings.SplitSeq(header, ";") {
 		name, value, ok := strings.Cut(field, "=")
 		if !ok {
 			continue

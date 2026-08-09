@@ -774,11 +774,9 @@ func TestConcurrentUpdatesLeaveConsistentState(t *testing.T) {
 
 	var wait sync.WaitGroup
 	for range 4 {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
+		wait.Go(func() {
 			_ = airport.Update()
-		}()
+		})
 	}
 	wait.Wait()
 
@@ -843,11 +841,9 @@ func TestConcurrentUpdatesDoNotCorruptTheSavedArchive(t *testing.T) {
 
 	var wait sync.WaitGroup
 	for range 6 {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
+		wait.Go(func() {
 			_ = airport.Update()
-		}()
+		})
 	}
 	wait.Wait()
 
