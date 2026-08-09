@@ -199,7 +199,10 @@ func getProxyDelay(server *Server) func(w http.ResponseWriter, r *http.Request) 
 		}
 
 		proxy := r.Context().Value(CtxKeyProxy).(adapter.Outbound)
-		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*time.Duration(timeout))
+		// 用箱子自己的 context：urltest 要从里面取根证书池和 NTP 时间函数。
+		// context.Background() 里两样都没有，于是用户在 certificate 里配的私有 CA
+		// 对测速完全无效，路由器时钟不准时连公网证书都会验不过。
+		ctx, cancel := context.WithTimeout(server.ctx, time.Millisecond*time.Duration(timeout))
 		defer cancel()
 
 		delay, err := urltest.URLTest(ctx, url, proxy)
