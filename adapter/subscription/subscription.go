@@ -1,8 +1,8 @@
-// Package provider 让 sing-box 自己订阅机场：拉取、转换、在运行中增删替换节点。
+// Package subscription 让 sing-box 自己订阅机场：拉取、转换、在运行中增删替换节点。
 //
 // 与「生成一份新配置再重启」的做法相比，这里全程不重启进程、不重写配置文件；没有被
 // 改动的节点，它们的出站对象一动不动，正在走它们的连接一条都不会断。
-package provider
+package subscription
 
 import (
 	"context"
@@ -16,22 +16,21 @@ import (
 	"github.com/sagernet/sing-box/common/convertor/mihomo"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
-
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/service"
 )
 
-var _ adapter.OutboundProvider = (*Provider)(nil)
+var _ adapter.Subscription = (*Subscription)(nil)
 
-// Provider 是一份订阅。
-type Provider struct {
+// Subscription 是一份订阅。
+type Subscription struct {
 	ctx        context.Context
 	ctxCancel  context.CancelFunc
 	logger     log.ContextLogger
 	logFactory log.Factory
 	router     adapter.Router
 	outbound   adapter.OutboundManager
-	options    option.OutboundProvider
+	options    option.Subscription
 	interval   time.Duration
 	httpClient *http.Client
 	// onUpdated 在节点集合变化之后通知管理器去重算各个组的成员。
@@ -43,30 +42,30 @@ type Provider struct {
 	content []byte
 }
 
-func New(ctx context.Context, router adapter.Router, logFactory log.Factory, options option.OutboundProvider, onUpdated func()) (*Provider, error) {
+func New(ctx context.Context, router adapter.Router, logFactory log.Factory, options option.Subscription, onUpdated func()) (*Subscription, error) {
 	if options.Tag == "" {
 		return nil, E.New("missing tag")
 	}
 	if options.URL == "" {
-		return nil, E.New("provider[", options.Tag, "]: missing url")
+		return nil, E.New("subscription[", options.Tag, "]: missing url")
 	}
 	switch options.Format {
 	case "", "mihomo":
 	default:
-		return nil, E.New("provider[", options.Tag, "]: unknown format: ", options.Format)
+		return nil, E.New("subscription[", options.Tag, "]: unknown format: ", options.Format)
 	}
 	interval := time.Duration(options.Interval)
 	if interval == 0 {
 		interval = 24 * time.Hour
 	}
 	if interval < time.Minute {
-		return nil, E.New("provider[", options.Tag, "]: interval must be at least 1m")
+		return nil, E.New("subscription[", options.Tag, "]: interval must be at least 1m")
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	return &Provider{
+	return &Subscription{
 		ctx:        ctx,
 		ctxCancel:  cancel,
-		logger:     logFactory.NewLogger("provider[" + options.Tag + "]"),
+		logger:     logFactory.NewLogger("subscription[" + options.Tag + "]"),
 		logFactory: logFactory,
 		router:     router,
 		outbound:   service.FromContext[adapter.OutboundManager](ctx),
@@ -76,74 +75,74 @@ func New(ctx context.Context, router adapter.Router, logFactory log.Factory, opt
 	}, nil
 }
 
-func (p *Provider) Tag() string {
-	return p.options.Tag
+func (s *Subscription) Tag() string {
+	return s.options.Tag
 }
 
-func (p *Provider) Nodes() []string {
-	p.access.RLock()
-	defer p.access.RUnlock()
-	return p.nodes
+func (s *Subscription) Nodes() []string {
+	s.access.RLock()
+	defer s.access.RUnlock()
+	return s.nodes
 }
 
 // Start 先用本地那份存档把节点立刻装上，再去拉新的。
 //
 // 拉取失败不能拖垮启动：路由器开机时网络往往还没通，而这份订阅正是连上网所需要的东西。
 // 失败只记一笔，后台循环会继续重试。
-func (p *Provider) Start() error {
-	transport, err := p.resolveTransport()
+func (s *Subscription) Start() error {
+	transport, err := s.resolveTransport()
 	if err != nil {
 		return err
 	}
-	p.httpClient = &http.Client{Transport: transport}
+	s.httpClient = &http.Client{Transport: transport}
 
-	if p.options.Path != "" {
-		content, readErr := os.ReadFile(p.options.Path)
+	if s.options.Path != "" {
+		content, readErr := os.ReadFile(s.options.Path)
 		if readErr == nil {
-			if applyErr := p.apply(content); applyErr != nil {
-				p.logger.Error("load saved subscription: ", applyErr)
+			if applyErr := s.apply(content); applyErr != nil {
+				s.logger.Error("load saved subscription: ", applyErr)
 			} else {
-				p.logger.Info("loaded ", len(p.Nodes()), " nodes from ", p.options.Path)
+				s.logger.Info("loaded ", len(s.Nodes()), " nodes from ", s.options.Path)
 			}
 		}
 	}
-	if len(p.Nodes()) == 0 {
-		if err = p.Update(); err != nil {
+	if len(s.Nodes()) == 0 {
+		if err = s.Update(); err != nil {
 			// 起不来也要让箱子跑起来：其余出站和规则照常工作，组暂时是空的。
-			p.logger.Error("initial update: ", err)
+			s.logger.Error("initial update: ", err)
 		}
 	}
-	go p.loop()
+	go s.loop()
 	return nil
 }
 
-func (p *Provider) Close() error {
-	p.ctxCancel()
+func (s *Subscription) Close() error {
+	s.ctxCancel()
 	return nil
 }
 
-func (p *Provider) loop() {
-	ticker := time.NewTicker(p.interval)
+func (s *Subscription) loop() {
+	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-p.ctx.Done():
+		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
-			if err := p.Update(); err != nil {
-				p.logger.Error("update: ", err)
+			if err := s.Update(); err != nil {
+				s.logger.Error("update: ", err)
 			}
 		}
 	}
 }
 
 // Update 拉一次订阅并应用。
-func (p *Provider) Update() error {
-	request, err := http.NewRequestWithContext(p.ctx, http.MethodGet, p.options.URL, nil)
+func (s *Subscription) Update() error {
+	request, err := http.NewRequestWithContext(s.ctx, http.MethodGet, s.options.URL, nil)
 	if err != nil {
 		return err
 	}
-	response, err := p.httpClient.Do(request)
+	response, err := s.httpClient.Do(request)
 	if err != nil {
 		return err
 	}
@@ -155,24 +154,24 @@ func (p *Provider) Update() error {
 	if err != nil {
 		return err
 	}
-	return p.apply(content)
+	return s.apply(content)
 }
 
 // apply 把一份订阅原文变成运行中的节点。
 //
 // 顺序不能反：先把新节点装上、再让各个组重算成员、最后才摘掉消失的节点。反过来的话，
 // 组会有一瞬间指着已经被摘掉的出站。
-func (p *Provider) apply(content []byte) error {
-	p.access.RLock()
-	unchanged := len(p.content) > 0 && string(p.content) == string(content)
-	previous := p.nodes
-	p.access.RUnlock()
+func (s *Subscription) apply(content []byte) error {
+	s.access.RLock()
+	unchanged := len(s.content) > 0 && string(s.content) == string(content)
+	previous := s.nodes
+	s.access.RUnlock()
 	if unchanged {
-		p.logger.Debug("subscription is unchanged")
+		s.logger.Debug("subscription is unchanged")
 		return nil
 	}
 
-	outbounds, skipped, err := mihomo.ToOptions(p.ctx, content)
+	outbounds, skipped, err := mihomo.ToOptions(s.ctx, content)
 	if err != nil {
 		return err
 	}
@@ -180,17 +179,17 @@ func (p *Provider) apply(content []byte) error {
 		// 一个都没转出来就装上去等于把所有组清空，那和断网没区别。
 		return E.New("no usable node out of ", len(outbounds)+len(skipped), " in the subscription")
 	}
-	if len(skipped) > 0 && !p.options.ExcludeSkipped {
+	if len(skipped) > 0 && !s.options.ExcludeSkipped {
 		for _, reason := range skipped {
-			p.logger.Warn("skipped: ", reason)
+			s.logger.Warn("skipped: ", reason)
 		}
 	}
 
 	tags := make([]string, 0, len(outbounds))
 	for _, outbound := range outbounds {
-		err = p.outbound.(adapter.DynamicOutboundManager).Replace(
-			p.ctx, p.router,
-			p.logFactory.NewLogger("outbound/"+outbound.Type+"["+outbound.Tag+"]"),
+		err = s.outbound.(adapter.DynamicOutboundManager).Replace(
+			s.ctx, s.router,
+			s.logFactory.NewLogger("outbound/"+outbound.Type+"["+outbound.Tag+"]"),
 			outbound.Tag, outbound.Type, outbound.Options,
 		)
 		if err != nil {
@@ -199,13 +198,13 @@ func (p *Provider) apply(content []byte) error {
 		tags = append(tags, outbound.Tag)
 	}
 
-	p.access.Lock()
-	p.nodes = tags
-	p.content = content
-	p.access.Unlock()
+	s.access.Lock()
+	s.nodes = tags
+	s.content = content
+	s.access.Unlock()
 
-	if p.onUpdated != nil {
-		p.onUpdated()
+	if s.onUpdated != nil {
+		s.onUpdated()
 	}
 
 	// 组已经不再引用它们了，现在摘掉才安全。
@@ -217,31 +216,31 @@ func (p *Provider) apply(content []byte) error {
 		if live[tag] {
 			continue
 		}
-		if err = p.outbound.Remove(tag); err != nil {
-			p.logger.Error("remove node ", tag, ": ", err)
+		if err = s.outbound.Remove(tag); err != nil {
+			s.logger.Error("remove node ", tag, ": ", err)
 		}
 	}
 
-	if p.options.Path != "" {
-		if err = os.WriteFile(p.options.Path, content, 0o600); err != nil {
+	if s.options.Path != "" {
+		if err = os.WriteFile(s.options.Path, content, 0o600); err != nil {
 			// 存不下只影响下次开机的启动速度，不影响这一次。
-			p.logger.Error("save subscription: ", err)
+			s.logger.Error("save subscription: ", err)
 		}
 	}
-	p.logger.Info("applied ", len(tags), " nodes")
+	s.logger.Info("applied ", len(tags), " nodes")
 	return nil
 }
 
-func (p *Provider) resolveTransport() (adapter.HTTPTransport, error) {
-	httpClientManager := service.FromContext[adapter.HTTPClientManager](p.ctx)
+func (s *Subscription) resolveTransport() (adapter.HTTPTransport, error) {
+	httpClientManager := service.FromContext[adapter.HTTPClientManager](s.ctx)
 	if httpClientManager == nil {
 		return nil, E.New("missing http client manager")
 	}
 	// 刻意不用 DefaultTransport：那个是走箱子自己的路由的。默认路由指向一个由订阅供给的
 	// 组时，启动那一刻它还空着——请求想出去得先有节点，节点却要靠这个请求拉回来，箱子
 	// 永远起不来。detour 留空 + DisableEmptyDirectCheck 得到的才是真正的直连拨号。
-	return httpClientManager.ResolveTransport(p.ctx, p.logger, option.HTTPClientOptions{
-		DialerOptions:           option.DialerOptions{Detour: p.options.DownloadDetour},
+	return httpClientManager.ResolveTransport(s.ctx, s.logger, option.HTTPClientOptions{
+		DialerOptions:           option.DialerOptions{Detour: s.options.DownloadDetour},
 		DisableEmptyDirectCheck: true,
 	})
 }

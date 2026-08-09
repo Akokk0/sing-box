@@ -29,10 +29,10 @@ func RegisterURLTest(registry *outbound.Registry) {
 }
 
 var (
-	_ adapter.OutboundGroup           = (*URLTest)(nil)
-	_ adapter.DynamicOutboundGroup    = (*URLTest)(nil)
-	_ adapter.ProviderOutboundGroup   = (*URLTest)(nil)
-	_ adapter.InterfaceUpdateListener = (*URLTest)(nil)
+	_ adapter.OutboundGroup             = (*URLTest)(nil)
+	_ adapter.DynamicOutboundGroup      = (*URLTest)(nil)
+	_ adapter.SubscriptionOutboundGroup = (*URLTest)(nil)
+	_ adapter.InterfaceUpdateListener   = (*URLTest)(nil)
 )
 
 type URLTest struct {
@@ -43,7 +43,7 @@ type URLTest struct {
 	logger                       log.ContextLogger
 	access                       sync.RWMutex
 	tags                         []string
-	providers                    []string
+	subscriptions                []string
 	filter                       []option.GroupFilter
 	link                         string
 	interval                     time.Duration
@@ -61,7 +61,7 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
 		connection:                   service.FromContext[adapter.ConnectionManager](ctx),
 		logger:                       logger,
 		tags:                         options.Outbounds,
-		providers:                    options.Providers,
+		subscriptions:                options.Subscriptions,
 		filter:                       options.Filter,
 		link:                         options.URL,
 		interval:                     time.Duration(options.Interval),
@@ -69,7 +69,7 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
 		idleTimeout:                  time.Duration(options.IdleTimeout),
 		interruptExternalConnections: options.InterruptExistConnections,
 	}
-	if len(outbound.tags) == 0 && len(outbound.providers) == 0 {
+	if len(outbound.tags) == 0 && len(outbound.subscriptions) == 0 {
 		return nil, E.New("missing tags")
 	}
 	return outbound, nil
@@ -147,13 +147,13 @@ func (s *URLTest) SetMembers(tags []string) error {
 	return nil
 }
 
-// ProviderTags 实现 adapter.ProviderOutboundGroup。
-func (s *URLTest) ProviderTags() []string {
-	return s.providers
+// SubscriptionTags 实现 adapter.SubscriptionOutboundGroup。
+func (s *URLTest) SubscriptionTags() []string {
+	return s.subscriptions
 }
 
-// SetProviderNodes 实现 adapter.ProviderOutboundGroup：订阅变了之后重算本组成员。
-func (s *URLTest) SetProviderNodes(tags []string) error {
+// SetSubscriptionNodes 实现 adapter.SubscriptionOutboundGroup：订阅变了之后重算本组成员。
+func (s *URLTest) SetSubscriptionNodes(tags []string) error {
 	selected, err := FilterTags(tags, s.filter)
 	if err != nil {
 		return err

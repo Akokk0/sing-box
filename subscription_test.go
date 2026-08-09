@@ -561,7 +561,7 @@ func node(name string, port int) string {
 
 // 整条链：sing-box 自己拉订阅、把 proxies 转成出站、按 filter 分配给策略组，
 // 全程不重启进程、不重写配置文件。
-func TestOutboundProviderDrivesGroupMembership(t *testing.T) {
+func TestSubscriptionDrivesGroupMembership(t *testing.T) {
 	subscription := startSubscriptionServer(t, "proxies:\n"+
 		// 机场把流量信息也伪装成节点排在最前面，它绝不能进任何组。
 		node("Traffic Reset：4 Days Left", 10001)+
@@ -569,20 +569,20 @@ func TestOutboundProviderDrivesGroupMembership(t *testing.T) {
 		node("🇯🇵 Japan 01", 10003))
 
 	instance, ctx := startBox(t, option.Options{
-		OutboundProviders: []option.OutboundProvider{{
+		Subscriptions: []option.Subscription{{
 			Tag: "airport",
 			URL: subscription.url,
 		}},
 		Outbounds: []option.Outbound{
 			{Type: C.TypeDirect, Tag: "direct"},
 			{Type: C.TypeSelector, Tag: "🐉 HK", Options: &option.SelectorOutboundOptions{
-				Providers: []string{"airport"},
+				Subscriptions: []string{"airport"},
 				Filter: []option.GroupFilter{
 					{Action: "include", Keywords: []string{"🇭🇰|HK|香港"}},
 				},
 			}},
 			{Type: C.TypeSelector, Tag: "🚀 ALL", Options: &option.SelectorOutboundOptions{
-				Providers: []string{"airport"},
+				Subscriptions: []string{"airport"},
 				Filter: []option.GroupFilter{
 					{Action: "exclude", Keywords: []string{"Traffic|Expire|Days Left"}},
 				},
@@ -611,9 +611,9 @@ func TestOutboundProviderDrivesGroupMembership(t *testing.T) {
 		node("🇭🇰 Hong Kong 01", 10002) +
 		node("🇭🇰 Hong Kong 02", 10004))
 
-	providerManager := service.FromContext[adapter.OutboundProviderManager](ctx)
-	require.NotNil(t, providerManager)
-	airport, found := providerManager.Provider("airport")
+	subscriptionManager := service.FromContext[adapter.SubscriptionManager](ctx)
+	require.NotNil(t, subscriptionManager)
+	airport, found := subscriptionManager.Subscription("airport")
 	require.True(t, found)
 	require.NoError(t, airport.Update())
 
@@ -631,14 +631,14 @@ func TestOutboundProviderDrivesGroupMembership(t *testing.T) {
 // `initial update: ... group[🚀 PROXY] has no members`，箱子永远起不来。
 //
 // 上一版栽在这里：注释写着「默认直连」，用的却是 DefaultTransport——那个是走箱子路由的。
-func TestOutboundProviderFetchesWithoutRoutingThroughItself(t *testing.T) {
+func TestSubscriptionFetchesWithoutRoutingThroughItself(t *testing.T) {
 	subscription := startSubscriptionServer(t, "proxies:\n"+node("🇭🇰 Hong Kong 01", 10002))
 
 	instance, _ := startBox(t, option.Options{
-		OutboundProviders: []option.OutboundProvider{{Tag: "airport", URL: subscription.url}},
+		Subscriptions: []option.Subscription{{Tag: "airport", URL: subscription.url}},
 		Outbounds: []option.Outbound{
 			{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{
-				Providers: []string{"airport"},
+				Subscriptions: []string{"airport"},
 			}},
 		},
 		Route: &option.RouteOptions{Final: "proxy"},

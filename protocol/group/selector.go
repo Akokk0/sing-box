@@ -25,11 +25,11 @@ func RegisterSelector(registry *outbound.Registry) {
 }
 
 var (
-	_ adapter.OutboundGroup           = (*Selector)(nil)
-	_ adapter.DynamicOutboundGroup    = (*Selector)(nil)
-	_ adapter.ProviderOutboundGroup   = (*Selector)(nil)
-	_ adapter.ConnectionHandler       = (*Selector)(nil)
-	_ adapter.PacketConnectionHandler = (*Selector)(nil)
+	_ adapter.OutboundGroup             = (*Selector)(nil)
+	_ adapter.DynamicOutboundGroup      = (*Selector)(nil)
+	_ adapter.SubscriptionOutboundGroup = (*Selector)(nil)
+	_ adapter.ConnectionHandler         = (*Selector)(nil)
+	_ adapter.PacketConnectionHandler   = (*Selector)(nil)
 )
 
 type Selector struct {
@@ -42,7 +42,7 @@ type Selector struct {
 	// 那是个原子值——换成员不该给每一次拨号都加上一把锁。
 	access                       sync.RWMutex
 	tags                         []string
-	providers                    []string
+	subscriptions                []string
 	filter                       []option.GroupFilter
 	defaultTag                   string
 	outbounds                    map[string]adapter.Outbound
@@ -60,7 +60,7 @@ func NewSelector(ctx context.Context, router adapter.Router, logger log.ContextL
 		connection:                   service.FromContext[adapter.ConnectionManager](ctx),
 		logger:                       logger,
 		tags:                         options.Outbounds,
-		providers:                    options.Providers,
+		subscriptions:                options.Subscriptions,
 		filter:                       options.Filter,
 		defaultTag:                   options.Default,
 		outbounds:                    make(map[string]adapter.Outbound),
@@ -68,7 +68,7 @@ func NewSelector(ctx context.Context, router adapter.Router, logger log.ContextL
 		interruptGroup:               interrupt.NewGroup(),
 		interruptExternalConnections: options.InterruptExistConnections,
 	}
-	if len(outbound.tags) == 0 && len(outbound.providers) == 0 {
+	if len(outbound.tags) == 0 && len(outbound.subscriptions) == 0 {
 		return nil, E.New("missing tags")
 	}
 	return outbound, nil
@@ -83,7 +83,7 @@ func (s *Selector) Network() []string {
 }
 
 func (s *Selector) Start() error {
-	// 成员来自订阅时，启动这一刻还一个都没有。provider 会在出站全部起来之后把它们送进来。
+	// 成员来自订阅时，启动这一刻还一个都没有。订阅会在出站全部起来之后把它们送进来。
 	if len(s.tags) == 0 {
 		return nil
 	}
@@ -263,13 +263,13 @@ func (s *Selector) NewPacketConnection(ctx context.Context, conn N.PacketConn, m
 	}
 }
 
-// ProviderTags 实现 adapter.ProviderOutboundGroup。
-func (s *Selector) ProviderTags() []string {
-	return s.providers
+// SubscriptionTags 实现 adapter.SubscriptionOutboundGroup。
+func (s *Selector) SubscriptionTags() []string {
+	return s.subscriptions
 }
 
-// SetProviderNodes 实现 adapter.ProviderOutboundGroup：订阅变了之后重算本组成员。
-func (s *Selector) SetProviderNodes(tags []string) error {
+// SetSubscriptionNodes 实现 adapter.SubscriptionOutboundGroup：订阅变了之后重算本组成员。
+func (s *Selector) SetSubscriptionNodes(tags []string) error {
 	selected, err := FilterTags(tags, s.filter)
 	if err != nil {
 		return err

@@ -3,8 +3,8 @@ package option
 import "github.com/sagernet/sing/common/json/badoption"
 
 type SelectorOutboundOptions struct {
-	// Providers 让本组的成员来自这几份订阅，而不是写死在配置里。
-	Providers []string `json:"providers,omitempty"`
+	// Subscriptions 让本组的成员来自这几份订阅，而不是写死在配置里。
+	Subscriptions []string `json:"subscriptions,omitempty"`
 	// Filter 从那些节点里挑出本组的成员，按声明顺序应用。
 	Filter                    []GroupFilter `json:"filter,omitempty"`
 	Outbounds                 []string      `json:"outbounds" reference:"outbound"`
@@ -13,8 +13,8 @@ type SelectorOutboundOptions struct {
 }
 
 type URLTestOutboundOptions struct {
-	// Providers 让本组的成员来自这几份订阅，而不是写死在配置里。
-	Providers []string `json:"providers,omitempty"`
+	// Subscriptions 让本组的成员来自这几份订阅，而不是写死在配置里。
+	Subscriptions []string `json:"subscriptions,omitempty"`
 	// Filter 从那些节点里挑出本组的成员，按声明顺序应用。
 	Filter                    []GroupFilter      `json:"filter,omitempty"`
 	Outbounds                 []string           `json:"outbounds" reference:"outbound"`

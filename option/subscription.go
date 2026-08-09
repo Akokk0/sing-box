@@ -4,12 +4,12 @@ import (
 	"github.com/sagernet/sing/common/json/badoption"
 )
 
-// OutboundProvider 是一份机场订阅：sing-box 自己去拉、自己转成出站、自己按 filter
+// Subscription 是一份机场订阅：sing-box 自己去拉、自己转成出站、自己按 filter
 // 分配给策略组。
 //
 // 节点在运行中增删替换，进程不重启、配置文件不重写，正在走没被改动的那些节点的连接
 // 一条都不会断。
-type OutboundProvider struct {
+type Subscription struct {
 	Tag string `json:"tag"`
 	// URL 是订阅地址。这里面的 token 等同机场的账号密码，配置文件的权限要照此对待。
 	URL string `json:"url"`
@@ -28,7 +28,7 @@ type OutboundProvider struct {
 	ExcludeSkipped bool `json:"exclude_skipped,omitempty"`
 }
 
-// GroupFilter 从 provider 给出的节点里挑出本组的成员。
+// GroupFilter 从订阅给出的节点里挑出本组的成员。
 //
 // 按声明顺序依次应用：include 只留下命中的，exclude 去掉命中的。keywords 里的每一条都是
 // 正则，命中任意一条即算命中。
