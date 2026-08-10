@@ -20,6 +20,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/json/badoption"
 	M "github.com/sagernet/sing/common/metadata"
@@ -1113,4 +1114,98 @@ func TestGroupDoesNotListAMemberTwice(t *testing.T) {
 	require.True(t, loaded)
 	require.Equal(t, []string{"\U0001F1ED\U0001F1F0 Hong Kong 01", "\U0001F1EF\U0001F1F5 Japan 01"},
 		outbound.(adapter.OutboundGroup).All())
+}
+
+// startClosableBox 与 startBox 相同，但由调用方决定何时 Close——缓存文件是 bbolt，
+// 同一个文件不能同时被两个箱子打开，重启场景必须先关掉前一个。
+func startClosableBox(t *testing.T, options option.Options) *box.Box {
+	t.Helper()
+	ctx, cancel := context.WithCancel(include.Context(context.Background()))
+	options.Log = &option.LogOptions{Level: "warning"}
+	instance, err := box.New(box.Options{Context: ctx, Options: options})
+	if err != nil {
+		cancel()
+		t.Fatalf("create box: %v", err)
+	}
+	if err = instance.Start(); err != nil {
+		cancel()
+		t.Fatalf("start box: %v", err)
+	}
+	t.Cleanup(cancel)
+	return instance
+}
+
+// 用户在面板上选的节点要跨重启记住。普通 selector 一直如此，订阅驱动的却不是：
+// 启动那一刻组里一个成员都没有，Start 里读缓存那段够不着，等订阅把节点送进来时
+// 又没人再去问缓存——于是路由器每重启一次，手选的节点就被打回第一个。
+func TestSubscriptionSelectorRestoresTheSavedSelection(t *testing.T) {
+	subscription := startSubscriptionServer(t, "proxies:\n"+
+		node("🇭🇰 Hong Kong 01", 10002)+
+		node("🇯🇵 Japan 01", 10003))
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+
+	options := func() option.Options {
+		return option.Options{
+			Experimental: &option.ExperimentalOptions{
+				CacheFile: &option.CacheFileOptions{Enabled: true, Path: cachePath},
+			},
+			Subscriptions: []option.Subscription{{Tag: "airport", URL: subscription.url}},
+			Outbounds: []option.Outbound{
+				{Type: C.TypeDirect, Tag: "direct"},
+				{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{
+					Subscriptions: []string{"airport"},
+				}},
+			},
+		}
+	}
+	groupOf := func(instance *box.Box) adapter.OutboundGroup {
+		outbound, loaded := instance.Outbound().Outbound("proxy")
+		require.True(t, loaded)
+		return outbound.(adapter.OutboundGroup)
+	}
+
+	first := startClosableBox(t, options())
+	selector, isSelector := groupOf(first).(*group.Selector)
+	require.True(t, isSelector)
+	require.True(t, selector.SelectOutbound("🇯🇵 Japan 01"))
+	require.Equal(t, "🇯🇵 Japan 01", groupOf(first).Now())
+	require.NoError(t, first.Close())
+
+	second := startClosableBox(t, options())
+	t.Cleanup(func() { _ = second.Close() })
+	require.Equal(t, "🇯🇵 Japan 01", groupOf(second).Now())
+}
+
+// 普通 selector 的缓存恢复本来就该工作，但没有测试钉住它。上面那条重构动了这段代码，
+// 所以把它一起刻画下来。
+func TestStaticSelectorRestoresTheSavedSelection(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	options := func() option.Options {
+		return option.Options{
+			Experimental: &option.ExperimentalOptions{
+				CacheFile: &option.CacheFileOptions{Enabled: true, Path: cachePath},
+			},
+			Outbounds: []option.Outbound{
+				{Type: C.TypeDirect, Tag: "direct-a"},
+				{Type: C.TypeDirect, Tag: "direct-b"},
+				{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{
+					Outbounds: []string{"direct-a", "direct-b"},
+				}},
+			},
+		}
+	}
+	groupOf := func(instance *box.Box) adapter.OutboundGroup {
+		outbound, loaded := instance.Outbound().Outbound("proxy")
+		require.True(t, loaded)
+		return outbound.(adapter.OutboundGroup)
+	}
+
+	first := startClosableBox(t, options())
+	require.Equal(t, "direct-a", groupOf(first).Now())
+	require.True(t, groupOf(first).(*group.Selector).SelectOutbound("direct-b"))
+	require.NoError(t, first.Close())
+
+	second := startClosableBox(t, options())
+	t.Cleanup(func() { _ = second.Close() })
+	require.Equal(t, "direct-b", groupOf(second).Now())
 }

@@ -99,18 +99,9 @@ func (s *Selector) Start() error {
 	s.outbounds = outbounds
 	s.access.Unlock()
 
-	if s.Tag() != "" {
-		cacheFile := service.FromContext[adapter.CacheFile](s.ctx)
-		if cacheFile != nil {
-			selected := cacheFile.LoadSelected(s.Tag())
-			if selected != "" {
-				detour, loaded := outbounds[selected]
-				if loaded {
-					s.selected.Store(detour)
-					return nil
-				}
-			}
-		}
+	if detour := s.restoreSelection(outbounds); detour != nil {
+		s.selected.Store(detour)
+		return nil
 	}
 
 	if s.defaultTag != "" {
@@ -143,6 +134,39 @@ func (s *Selector) All() []string {
 	s.access.RLock()
 	defer s.access.RUnlock()
 	return s.tags
+}
+
+// restoreSelection 找回用户上次手动选的那个，没有则返回 nil。
+func (s *Selector) restoreSelection(outbounds map[string]adapter.Outbound) adapter.Outbound {
+	if s.Tag() == "" {
+		return nil
+	}
+	cacheFile := service.FromContext[adapter.CacheFile](s.ctx)
+	if cacheFile == nil {
+		return nil
+	}
+	selected := cacheFile.LoadSelected(s.Tag())
+	if selected == "" {
+		return nil
+	}
+	// 缓存里那个节点可能已经不在组里了（机场撤了它，或者 filter 改了），此时返回 nil。
+	return outbounds[selected]
+}
+
+// firstSelection 是「还没选过」时的落点：先看缓存里用户上次手动选的，再看 default，
+// 最后才是第一个。
+//
+// 订阅驱动的组走的正是这条路。它启动那一刻一个成员都没有，Start 里恢复缓存那段够不着；
+// 不在这里再问一次的话，路由器每重启一次，用户手选的节点就被打回第一个。
+func (s *Selector) firstSelection(outbounds map[string]adapter.Outbound, tags []string) adapter.Outbound {
+	if detour := s.restoreSelection(outbounds); detour != nil {
+		return detour
+	}
+	// defaultTag 为空时这里查不到，正好落到下面的第一个。
+	if detour, loaded := outbounds[s.defaultTag]; loaded {
+		return detour
+	}
+	return outbounds[tags[0]]
 }
 
 // resolve 把 tag 表换成出站对象。任何一个找不到就整体失败，调用方据此保持原样。
@@ -188,7 +212,7 @@ func (s *Selector) SetMembers(tags []string) error {
 	// 只按 tag 判断在不在是不够的——节点被替换时 tag 一个字没变，而指针必须换。
 	switch selected := s.selected.Load(); {
 	case selected == nil:
-		s.selected.Store(outbounds[tags[0]])
+		s.selected.Store(s.firstSelection(outbounds, tags))
 	case outbounds[selected.Tag()] == nil:
 		s.selected.Store(outbounds[tags[0]])
 	case outbounds[selected.Tag()] != selected:
