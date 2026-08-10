@@ -108,6 +108,12 @@
         "$ref": "#/$defs/Outbound"
       }
     },
+    "subscriptions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Subscription"
+      }
+    },
     "route": {
       "$ref": "#/$defs/RouteOptions"
     },
@@ -4795,6 +4801,32 @@
         },
         "debug": {
           "$ref": "#/$defs/DebugOptions"
+        }
+      },
+      "additionalProperties": false
+    },
+    "GroupFilter": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "include",
+            "exclude"
+          ]
+        },
+        "keywords": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -11878,6 +11910,19 @@
             "tag": {
               "type": "string"
             },
+            "subscriptions": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "x-tag-reference": "subscription"
+              }
+            },
+            "filter": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/GroupFilter"
+              }
+            },
             "outbounds": {
               "type": "array",
               "items": {
@@ -13477,6 +13522,19 @@
             },
             "tag": {
               "type": "string"
+            },
+            "subscriptions": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "x-tag-reference": "subscription"
+              }
+            },
+            "filter": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/GroupFilter"
+              }
             },
             "outbounds": {
               "type": "array",
@@ -17048,6 +17106,42 @@
         },
         "userkey": {
           "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Subscription": {
+      "type": "object",
+      "properties": {
+        "tag": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "mihomo"
+          ]
+        },
+        "interval": {
+          "$ref": "#/$defs/Duration"
+        },
+        "download_detour": {
+          "type": "string"
+        },
+        "download_timeout": {
+          "$ref": "#/$defs/Duration"
+        },
+        "user_agent": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "exclude_skipped": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false
