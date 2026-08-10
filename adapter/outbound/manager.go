@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 
@@ -205,10 +206,19 @@ func (m *Manager) Close() error {
 	return nil
 }
 
+// Outbounds 返回一份快照。
+//
+// 必须是拷贝，不能是内部那份切片本身：Remove 和 Replace 都用
+// append(m.outbounds[:i], m.outbounds[i+1:]...) 把后面的元素往前挪，改的是同一个底层
+// 数组。调用方脱锁遍历时，那份数组正在它脚下被改写——同一个出站会被读到两次，或者
+// 某一个凭空消失，而 -race 直接报 DATA RACE。
+//
+// 订阅让这件事从「几乎不会发生」变成了每天都在跑：机场撤掉一个节点就是一次 Remove，
+// 而面板的 /proxies 恰好就是这么遍历这份列表的。
 func (m *Manager) Outbounds() []adapter.Outbound {
 	m.access.RLock()
 	defer m.access.RUnlock()
-	return m.outbounds
+	return slices.Clone(m.outbounds)
 }
 
 func (m *Manager) Outbound(tag string) (adapter.Outbound, bool) {

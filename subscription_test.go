@@ -1209,3 +1209,62 @@ func TestStaticSelectorRestoresTheSavedSelection(t *testing.T) {
 	t.Cleanup(func() { _ = second.Close() })
 	require.Equal(t, "direct-b", groupOf(second).Now())
 }
+
+// 出站管理器把内部那份切片直接交出去，而订阅更新会原地改写同一个底层数组：
+// Remove 用 append(outbounds[:i], outbounds[i+1:]...) 把后面的元素往前挪。
+// Clash API 的 /proxies 正是这么遍历它的,于是面板刷新撞上订阅更新就会读到
+// 挪了一半的数组——同一个出站出现两次,或者某一个凭空消失。
+//
+// 可靠的信号是 -race：不带它跑时能不能撞上取决于调度，重复元素那条断言只是兜底。
+func TestListingOutboundsIsSafeDuringASubscriptionUpdate(t *testing.T) {
+	first := "proxies:\n" + node("A", 10011) + node("B", 10012) + node("C", 10013)
+	second := "proxies:\n" + node("D", 10014) + node("E", 10015)
+	subscription := startSubscriptionServer(t, first)
+
+	instance, ctx := startBox(t, option.Options{
+		Subscriptions: []option.Subscription{{Tag: "airport", URL: subscription.url}},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "direct"},
+			{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport"},
+			}},
+		},
+	})
+	airport, _ := service.FromContext[adapter.SubscriptionManager](ctx).Subscription("airport")
+
+	readerDone := make(chan struct{})
+	duplicates := make(chan string, 1)
+	go func() {
+		defer close(readerDone)
+		for range 3000 {
+			seen := make(map[string]bool)
+			for _, outbound := range instance.Outbound().Outbounds() {
+				tag := outbound.Tag()
+				if seen[tag] {
+					select {
+					case duplicates <- tag:
+					default:
+					}
+					return
+				}
+				seen[tag] = true
+			}
+		}
+	}()
+
+	for i := range 30 {
+		if i%2 == 0 {
+			subscription.serve(second)
+		} else {
+			subscription.serve(first)
+		}
+		require.NoError(t, airport.Update())
+	}
+	<-readerDone
+
+	select {
+	case tag := <-duplicates:
+		t.Fatalf("outbound %q was listed twice, so the slice was rewritten mid-read", tag)
+	default:
+	}
+}
