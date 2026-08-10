@@ -131,3 +131,42 @@ func TestToOptionsRejectsSomethingThatIsNotASubscription(t *testing.T) {
 	_, _, err := mihomo.ToOptions(ctx, []byte("<html><body>403 Forbidden</body></html>"))
 	require.Error(t, err)
 }
+
+// 不加 t.Parallel()：include.Context 会写 naive.ConfigureHTTP3ListenerFunc 这个包级变量，
+// 两个测试同时调它就是一次数据竞争。这个文件里已有的测试也都是串行的。
+//
+// YAML 里给端口加引号是合法写法，野生订阅里确实有。mihomo 的解码器开了
+// WeaklyTypedInput，"443" 照样当 443 用；我们直接丢给 option 反序列化的话，
+// uint16 收到字符串就报错，整个节点被静默跳过。
+func TestToOptionsAcceptsAQuotedPort(t *testing.T) {
+	outbounds, skipped, err := mihomo.ToOptions(include.Context(context.Background()), []byte(`
+proxies:
+  - name: "quoted"
+    type: ss
+    server: jp.example.invalid
+    port: "8388"
+    cipher: chacha20-ietf-poly1305
+    password: FAKE-PASSWORD-NOT-REAL
+`))
+	require.NoError(t, err)
+	require.Empty(t, skipped)
+	require.Len(t, outbounds, 1)
+	require.Equal(t, uint16(8388), outbounds[0].Options.(*option.ShadowsocksOutboundOptions).ServerPort)
+}
+
+// 端口根本不是个数时必须照旧跳过并说明原因，不能悄悄变成 0。
+func TestToOptionsSkipsANonNumericPort(t *testing.T) {
+	outbounds, skipped, err := mihomo.ToOptions(include.Context(context.Background()), []byte(`
+proxies:
+  - name: "broken"
+    type: ss
+    server: jp.example.invalid
+    port: "not-a-port"
+    cipher: chacha20-ietf-poly1305
+    password: FAKE-PASSWORD-NOT-REAL
+`))
+	require.NoError(t, err)
+	require.Empty(t, outbounds)
+	require.Len(t, skipped, 1)
+	require.Contains(t, skipped[0], "broken")
+}

@@ -8,6 +8,7 @@ package mihomo
 
 import (
 	"context"
+	"math"
 	"strconv"
 
 	"github.com/sagernet/sing-box/option"
@@ -53,10 +54,14 @@ func convert(ctx context.Context, proxy map[string]any) (option.Outbound, error)
 	}
 	proxyType, _ := proxy["type"].(string)
 
+	port, err := parsePort(proxy["port"])
+	if err != nil {
+		return option.Outbound{}, E.Cause(err, "proxy ", name)
+	}
 	fields := map[string]any{
 		"tag":         name,
 		"server":      proxy["server"],
-		"server_port": proxy["port"],
+		"server_port": port,
 	}
 	switch proxyType {
 	case "anytls":
@@ -118,6 +123,29 @@ func buildTLS(proxy map[string]any) map[string]any {
 		tls["utls"] = map[string]any{"enabled": true, "fingerprint": fingerprint}
 	}
 	return tls
+}
+
+// parsePort 接受 YAML 给出的两种端口写法。
+//
+// 加引号是合法的 YAML，野生订阅里确实有；mihomo 的解码器开着 WeaklyTypedInput，
+// "8388" 照样当 8388 用。直接把字符串交给 option 反序列化的话，uint16 收到字符串就
+// 报错，整个节点被静默跳过——机场那边看起来一切正常，用户这边少了一批线路。
+func parsePort(value any) (uint16, error) {
+	switch typed := value.(type) {
+	case int:
+		if typed < 0 || typed > math.MaxUint16 {
+			return 0, E.New("port out of range: ", typed)
+		}
+		return uint16(typed), nil
+	case string:
+		parsed, err := strconv.ParseUint(typed, 10, 16)
+		if err != nil {
+			return 0, E.New("invalid port: ", typed)
+		}
+		return uint16(parsed), nil
+	default:
+		return 0, E.New("missing port")
+	}
 }
 
 func copyIf(fields map[string]any, proxy map[string]any, from string, to string) {
