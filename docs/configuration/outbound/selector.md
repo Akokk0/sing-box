@@ -10,6 +10,8 @@
     "proxy-b",
     "proxy-c"
   ],
+  "subscriptions": [],
+  "filter": [],
   "default": "proxy-c",
   "interrupt_exist_connections": false
 }
@@ -23,9 +25,25 @@
 
 #### outbounds
 
-==Required==
+==Required== when `subscriptions` is empty
 
 List of outbound tags to select.
+
+#### subscriptions
+
+!!! question "Since sing-box 1.14.0"
+
+List of [Subscription](/configuration/subscription/) tags supplying this group's members.
+
+Adds to `outbounds` rather than replacing it, so a group can name fixed outbounds alongside an
+airport's nodes.
+
+#### filter
+
+!!! question "Since sing-box 1.14.0"
+
+Picks this group's members out of the nodes the subscriptions supplied. See
+[Subscription](/configuration/subscription/#filter).
 
 #### default
 

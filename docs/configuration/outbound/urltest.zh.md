@@ -10,6 +10,8 @@
     "proxy-b",
     "proxy-c"
   ],
+  "subscriptions": [],
+  "filter": [],
   "url": "",
   "interval": "",
   "tolerance": 50,
@@ -22,9 +24,24 @@
 
 #### outbounds
 
-==必填==
+`subscriptions` 为空时 ==必填==
 
 用于测试的出站标签列表。
+
+#### subscriptions
+
+!!! question "自 sing-box 1.14.0 起"
+
+供给本组成员的[订阅](/zh/configuration/subscription/)标签列表。
+
+与 `outbounds` 是相加而不是替换的关系。更新带来的新成员会立刻被测一次，不必等满一个
+`interval` 才有资格被选中。
+
+#### filter
+
+!!! question "自 sing-box 1.14.0 起"
+
+从订阅送来的节点里挑出本组的成员。见[订阅](/zh/configuration/subscription/#filter)。
 
 #### url
 

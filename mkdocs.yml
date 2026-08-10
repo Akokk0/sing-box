@@ -109,6 +109,7 @@ nav:
           - FakeIP: configuration/dns/fakeip.md
       - NTP: configuration/ntp/index.md
       - Certificate: configuration/certificate/index.md
+      - Subscription: configuration/subscription/index.md
       - Route:
           - configuration/route/index.md
           - GeoIP: configuration/route/geoip.md
@@ -315,6 +316,7 @@ plugins:
             Network Namespace: 网络命名空间
             Endpoint: 端点
             Inbound: 入站
+            Subscription: 订阅
             Outbound: 出站
             Certificate Provider: 证书提供者
 

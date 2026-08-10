@@ -10,6 +10,8 @@
     "proxy-b",
     "proxy-c"
   ],
+  "subscriptions": [],
+  "filter": [],
   "url": "",
   "interval": "",
   "tolerance": 0,
@@ -22,9 +24,25 @@
 
 #### outbounds
 
-==Required==
+==Required== when `subscriptions` is empty
 
 List of outbound tags to test.
+
+#### subscriptions
+
+!!! question "Since sing-box 1.14.0"
+
+List of [Subscription](/configuration/subscription/) tags supplying this group's members.
+
+Adds to `outbounds` rather than replacing it. Members added by an update are tested straight
+away, so a new node does not have to wait out an interval before it can be selected.
+
+#### filter
+
+!!! question "Since sing-box 1.14.0"
+
+Picks this group's members out of the nodes the subscriptions supplied. See
+[Subscription](/configuration/subscription/#filter).
 
 #### url
 
