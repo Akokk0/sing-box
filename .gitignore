@@ -10,8 +10,13 @@
 /sing-box.exe
 /sing-box-*
 /*.bak
+# 订阅存档和本地配置都是明文的节点密码，宁可挡宽一点。上游在根目录跟踪的那两个
+# yaml 在这里放行——它们已经被跟踪，规则本来就管不到，写出来是为了说明这条不是
+# 冲着它们去的。
 /*.yaml
 /*.yml
+!/.golangci.yml
+!/mkdocs.yml
 /build/
 /*.jar
 /*.aar
