@@ -125,7 +125,9 @@ func (s *Subscription) Start() error {
 	if err != nil {
 		return err
 	}
+	s.access.Lock()
 	s.httpClient = &http.Client{Transport: transport}
+	s.access.Unlock()
 
 	if s.options.Path != "" {
 		content, readErr := os.ReadFile(s.options.Path)
@@ -192,6 +194,17 @@ func (s *Subscription) loop() {
 func (s *Subscription) Update() error {
 	s.updateAccess.Lock()
 	defer s.updateAccess.Unlock()
+	// Clash API 的监听端口比这份订阅的 Start() 先起来，而多份订阅是按序启动的：
+	// 前一份卡在首次拉取时，后一份还没轮到，httpClient 仍是 nil。用户这时候在面板上
+	// 点「更新」，httpClient.Do 就是一次 nil 解引用——整个进程一起没。
+	//
+	// 持锁读也是必须的：写它的是 Start()，跑在另一个协程上。
+	s.access.RLock()
+	httpClient := s.httpClient
+	s.access.RUnlock()
+	if httpClient == nil {
+		return E.New("subscription[", s.options.Tag, "] has not started yet")
+	}
 	// 超时挂在这次请求上，而不是 http.Client 上：Client 的 Timeout 会把读 body 也算进去，
 	// 但它是给所有请求共用的，改起来影响面更大。
 	ctx, cancel := context.WithTimeout(s.ctx, s.timeout)
@@ -203,7 +216,7 @@ func (s *Subscription) Update() error {
 	if s.options.UserAgent != "" {
 		request.Header.Set("User-Agent", s.options.UserAgent)
 	}
-	response, err := s.httpClient.Do(request)
+	response, err := httpClient.Do(request)
 	if err != nil {
 		// 遮蔽在这里做，而不是在打日志的地方：这个错误还会经 Clash API 原样发给面板，
 		// 每多一个消费方就多一次漏掉的机会。

@@ -366,15 +366,16 @@ func New(options Options) (*Box, error) {
 			return nil, E.Cause(err, "initialize outbound[", i, "]")
 		}
 	}
+	// 订阅要往出站管理器里塞节点、还要改策略组，所以它的 Start 只在 StartStateStarted
+	// 阶段动手——那时所有出站都已经起来了。这里只建对象并注册，真正排进 internalServices
+	// 的位置在下面，clash 服务之后。
+	var subscriptionManager *subscription.Manager
 	if len(options.Subscriptions) > 0 {
-		// 订阅要往出站管理器里塞节点、还要改策略组，所以它的 Start 只在
-		// StartStateStarted 阶段动手——那时所有出站都已经起来了。
-		subscriptionManager, err := subscription.NewManager(ctx, logFactory, router, options.Subscriptions)
+		subscriptionManager, err = subscription.NewManager(ctx, logFactory, router, options.Subscriptions)
 		if err != nil {
 			return nil, err
 		}
 		service.MustRegister[adapter.SubscriptionManager](ctx, subscriptionManager)
-		internalServices = append(internalServices, subscriptionManager)
 	}
 	for i, certificateProviderOptions := range options.CertificateProviders {
 		var tag string
@@ -471,6 +472,13 @@ func New(options Options) (*Box, error) {
 		})
 		timeService.TimeService = ntpService
 		internalServices = append(internalServices, adapter.NewLifecycleService(ntpService, "ntp service"))
+	}
+	if subscriptionManager != nil {
+		// 排在最后，尤其是排在 clash 服务之后：首次开机、还没有本地存档时，第一次拉取是
+		// 同步的，而路由器那时 WAN 往往还没通，所以它会一直等到 download_timeout 用完。
+		// 这些内部服务是按序启动的，订阅要是排在前面，面板的监听端口就被一起挡住了——
+		// 而那正是最需要面板告诉你出了什么事的时刻。
+		internalServices = append(internalServices, subscriptionManager)
 	}
 	return &Box{
 		network:             networkManager,

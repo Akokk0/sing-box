@@ -5,6 +5,7 @@
 package box_test
 
 import (
+	"context"
 	"encoding/json"
 	"encoding/pem"
 	"io"
@@ -15,8 +16,11 @@ import (
 	"testing"
 	"time"
 
+	box "github.com/sagernet/sing-box"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common/json/badoption"
 
 	"github.com/stretchr/testify/require"
 )
@@ -43,6 +47,27 @@ func startBoxWithClashAPI(t *testing.T, options option.Options) string {
 	}
 	t.Fatal("the clash api never came up")
 	return ""
+}
+
+// startBoxAsync 在后台起箱子，把错误送回测试协程——startBox 里有 t.Fatalf，
+// 那必须在测试自己的协程上调。返回的 channel 在 Start() 返回时关闭。
+func startBoxAsync(t *testing.T, options option.Options) <-chan error {
+	t.Helper()
+	ctx, cancel := context.WithCancel(include.Context(context.Background()))
+	t.Cleanup(cancel)
+	options.Log = &option.LogOptions{Level: "warning"}
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		instance, err := box.New(box.Options{Context: ctx, Options: options})
+		if err != nil {
+			done <- err
+			return
+		}
+		t.Cleanup(func() { _ = instance.Close() })
+		done <- instance.Start()
+	}()
+	return done
 }
 
 func getJSON(t *testing.T, url string) map[string]any {
@@ -371,4 +396,87 @@ func TestClashAPIRefreshFailureDoesNotLeakTheSubscriptionURL(t *testing.T) {
 
 	require.Equal(t, http.StatusServiceUnavailable, response.StatusCode)
 	require.NotContains(t, string(body), "SECRET-TOKEN", "the dashboard was handed the subscription token")
+}
+
+// 首次开机、还没有本地存档时，第一次拉取是同步的——路由器上这一步常常要等满
+// download_timeout（默认 30 秒），因为 WAN 还没通。那正是最需要面板告诉你出了什么事的
+// 时刻，它却连不上：订阅管理器排在 clash 服务之前启动，把监听端口一起挡在了后面。
+func TestClashAPIComesUpWhileTheFirstFetchIsStillBlocked(t *testing.T) {
+	hanging := startHangingServer(t)
+	port := reservePort(t)
+	address := "127.0.0.1:" + strconv.Itoa(int(port))
+
+	started := startBoxAsync(t, option.Options{
+		Experimental: &option.ExperimentalOptions{
+			ClashAPI: &option.ClashAPIOptions{ExternalController: address},
+		},
+		Subscriptions: []option.Subscription{{
+			Tag: "airport", URL: hanging,
+			DownloadTimeout: badoption.Duration(30 * time.Second),
+		}},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "direct"},
+			{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport"},
+			}},
+		},
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if response, err := http.Get("http://" + address + "/version"); err == nil {
+			_ = response.Body.Close()
+			return
+		}
+		select {
+		case err := <-started:
+			t.Fatalf("the box finished starting (%v) before the API answered, so the fetch was not still in flight", err)
+		default:
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the clash api never came up while the first fetch was in flight")
+}
+
+// 上一条把订阅挪到了 clash 服务之后启动，于是多出一个窗口：面板已经在监听，而这份订阅
+// 的 Start() 还没跑到给 httpClient 赋值那一步。用户在这个窗口里点「更新」不能把整个
+// 进程打崩——那是一次 nil 解引用。
+func TestClashAPIRefreshBeforeTheSubscriptionStartedDoesNotCrash(t *testing.T) {
+	hanging := startHangingServer(t)
+	port := reservePort(t)
+	address := "127.0.0.1:" + strconv.Itoa(int(port))
+
+	startBoxAsync(t, option.Options{
+		Experimental: &option.ExperimentalOptions{
+			ClashAPI: &option.ClashAPIOptions{ExternalController: address},
+		},
+		Subscriptions: []option.Subscription{
+			// 第一份挂住，第二份的 Start() 因此还排在队里没轮到。
+			{Tag: "slow", URL: hanging, DownloadTimeout: badoption.Duration(30 * time.Second)},
+			{Tag: "airport", URL: hanging, DownloadTimeout: badoption.Duration(30 * time.Second)},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "direct"},
+			{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"slow", "airport"},
+			}},
+		},
+	})
+
+	baseURL := "http://" + address
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if response, err := http.Get(baseURL + "/version"); err == nil {
+			_ = response.Body.Close()
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	request, err := http.NewRequest(http.MethodPut, baseURL+"/providers/proxies/airport", nil)
+	require.NoError(t, err)
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err, "the box died instead of answering")
+	defer response.Body.Close()
+	require.Equal(t, http.StatusServiceUnavailable, response.StatusCode)
 }
