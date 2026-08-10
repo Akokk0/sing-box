@@ -1017,3 +1017,28 @@ func TestSubscriptionTimestampAdvancesEvenWhenNothingChanged(t *testing.T) {
 	require.True(t, secondArchive.ModTime().After(firstArchive.ModTime()),
 		"the archive's mtime did not move, so a restart would report a stale update time")
 }
+
+// 订阅地址里的 token 等同机场的账号密码。Go 的 http 客户端会把完整 URL 塞进它返回的
+// 每一个错误里，而这些错误会被打进日志——路由器上通常是落盘或进 syslog 的。
+func TestSubscriptionErrorsDoNotCarryTheURL(t *testing.T) {
+	// 没人监听这个端口，请求必定失败。
+	address := "127.0.0.1:" + strconv.Itoa(int(reservePort(t)))
+	secret := "http://" + address + "/api/v1/client/subscribe?token=SECRET-TOKEN"
+
+	_, ctx := startBox(t, option.Options{
+		Subscriptions: []option.Subscription{{Tag: "airport", URL: secret}},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "direct"},
+			{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport"},
+			}},
+		},
+	})
+	airport, _ := service.FromContext[adapter.SubscriptionManager](ctx).Subscription("airport")
+
+	err := airport.Update()
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "SECRET-TOKEN", "the subscription token reached the logs")
+	// 主机还是要留的，否则连是哪份订阅出的问题都看不出来。
+	require.Contains(t, err.Error(), address)
+}

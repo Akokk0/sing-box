@@ -198,14 +198,16 @@ func (s *Subscription) Update() error {
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, s.options.URL, nil)
 	if err != nil {
-		return err
+		return redactError(err)
 	}
 	if s.options.UserAgent != "" {
 		request.Header.Set("User-Agent", s.options.UserAgent)
 	}
 	response, err := s.httpClient.Do(request)
 	if err != nil {
-		return err
+		// 遮蔽在这里做，而不是在打日志的地方：这个错误还会经 Clash API 原样发给面板，
+		// 每多一个消费方就多一次漏掉的机会。
+		return redactError(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {

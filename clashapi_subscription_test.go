@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 
 	"github.com/stretchr/testify/require"
@@ -341,4 +342,33 @@ func TestClashAPIReportsTheHealthCheckContract(t *testing.T) {
 	status, present := airport["expectedStatus"].(string)
 	require.True(t, present, "no expectedStatus in %v", airport)
 	require.NotEmpty(t, status)
+}
+
+// 面板点「刷新」而机场连不上时，503 的响应体是直接把 Update() 的错误发出去的。
+// 订阅地址里的 token 等同机场的账号密码，而面板挂在局域网上、通常不带鉴权。
+func TestClashAPIRefreshFailureDoesNotLeakTheSubscriptionURL(t *testing.T) {
+	// 没人监听这个端口，拉取必定失败。
+	address := "127.0.0.1:" + strconv.Itoa(int(reservePort(t)))
+	secret := "http://" + address + "/api/v1/client/subscribe?token=SECRET-TOKEN"
+
+	baseURL := startBoxWithClashAPI(t, option.Options{
+		Subscriptions: []option.Subscription{{Tag: "airport", URL: secret}},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "direct"},
+			{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport"},
+			}},
+		},
+	})
+
+	request, err := http.NewRequest(http.MethodPut, baseURL+"/providers/proxies/airport", nil)
+	require.NoError(t, err)
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+
+	require.Equal(t, http.StatusServiceUnavailable, response.StatusCode)
+	require.NotContains(t, string(body), "SECRET-TOKEN", "the dashboard was handed the subscription token")
 }
