@@ -61,21 +61,28 @@ func (o *trackedOutbound) MultiplexEnabled() bool {
 	return false
 }
 
+// 先记账再拨号，顺序不能反。反过来的话，拨号进行中的这个出站看起来身上一条连接都没有，
+// 此时被换掉，retire() 一看计数是 0 就当场关掉内层——调用方下一刻拿到的正是一条建立在
+// 已关闭出站上的连接，而不打断这条连接恰恰是退役的全部意义。
+//
+// 代价是拨号失败要记得减回来，否则这个出站永远等不到退役。
 func (o *trackedOutbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	o.live.Add(1)
 	conn, err := o.Outbound.DialContext(ctx, network, destination)
 	if err != nil {
+		o.release()
 		return nil, err
 	}
-	o.live.Add(1)
 	return &trackedConn{Conn: conn, release: o.release}, nil
 }
 
 func (o *trackedOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+	o.live.Add(1)
 	conn, err := o.Outbound.ListenPacket(ctx, destination)
 	if err != nil {
+		o.release()
 		return nil, err
 	}
-	o.live.Add(1)
 	return &trackedPacketConn{PacketConn: conn, release: o.release}, nil
 }
 

@@ -288,8 +288,16 @@ func (m *Manager) UpdateDependencies(tag string, dependencies []string) error {
 	if _, found := m.outboundByTag[tag]; !found {
 		return os.ErrInvalid
 	}
-	// 先把 tag 从所有反向边上摘掉，再按新的依赖重新挂上。逐条增删的话，
-	// 一次成员替换里同时增和删的那些会互相盖掉。
+	m.setDependencies(tag, dependencies)
+	return nil
+}
+
+// setDependencies 把 tag 的反向边整体换成 dependencies。调用方必须持有写锁。
+//
+// 先摘干净再重新挂上，而不是逐条增删：一次成员替换里同时增和删的那些会互相盖掉。
+// 也正因为是「整体换」，反复 Replace 同一个 tag 才不会让边越堆越多——每次替换都会
+// 先把上一个出站留下的那些摘掉。
+func (m *Manager) setDependencies(tag string, dependencies []string) {
 	for dependency, dependBy := range m.dependByTag {
 		remaining := common.Filter(dependBy, func(it string) bool {
 			return it != tag
@@ -303,7 +311,6 @@ func (m *Manager) UpdateDependencies(tag string, dependencies []string) error {
 	for _, dependency := range dependencies {
 		m.dependByTag[dependency] = append(m.dependByTag[dependency], tag)
 	}
-	return nil
 }
 
 // Retiring 实现 adapter.DynamicOutboundManager，返回还在等连接走完的出站 tag。
@@ -366,9 +373,9 @@ func (m *Manager) Replace(ctx context.Context, router adapter.Router, logger log
 	}
 	m.outbounds = append(m.outbounds, outbound)
 	m.outboundByTag[tag] = outbound
-	for _, dependency := range outbound.Dependencies() {
-		m.dependByTag[dependency] = append(m.dependByTag[dependency], tag)
-	}
+	// 整体换而不是往上加：被顶掉的那个留下的反向边必须一起摘掉，否则订阅每天更新一次，
+	// 同一个 tag 反复被 Replace，边就一直堆到进程结束。
+	m.setDependencies(tag, outbound.Dependencies())
 	if m.defaultOutbound == previous || tag == m.defaultTag || (m.defaultTag == "" && m.defaultOutbound == nil) {
 		m.defaultOutbound = outbound
 	}
