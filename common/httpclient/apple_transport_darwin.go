@@ -67,30 +67,19 @@ func verifyApplePinnedPublicKeySHA256(flatHashes []byte, leafCertificate []byte)
 	return boxTLS.VerifyPublicKeySHA256(knownHashes, [][]byte{leafCertificate})
 }
 
-func verifyApplePinnedCertificateSHA256(flatHashes []byte, chain [][]byte) error {
+func verifyApplePinnedCertificateSHA256(flatHashes []byte, leafCertificate []byte) error {
 	knownHashes, err := splitApplePinnedHashes("certificate", flatHashes)
 	if err != nil {
 		return err
 	}
-	return boxTLS.VerifyCertificateSHA256(knownHashes, chain)
+	return boxTLS.VerifyCertificateSHA256(knownHashes, [][]byte{leafCertificate})
 }
 
 //export box_apple_http_verify_certificate_sha256
-func box_apple_http_verify_certificate_sha256(knownHashValues *C.uint8_t, knownHashValuesLen C.size_t, chain *C.uint8_t, chainLen C.size_t, chainLengths *C.size_t, chainCount C.size_t) *C.char {
+func box_apple_http_verify_certificate_sha256(knownHashValues *C.uint8_t, knownHashValuesLen C.size_t, leafCert *C.uint8_t, leafCertLen C.size_t) *C.char {
 	flatHashes := C.GoBytes(unsafe.Pointer(knownHashValues), C.int(knownHashValuesLen))
-	flatChain := C.GoBytes(unsafe.Pointer(chain), C.int(chainLen))
-	lengths := unsafe.Slice((*C.size_t)(chainLengths), int(chainCount))
-	rawCerts := make([][]byte, 0, int(chainCount))
-	var offset int
-	for _, length := range lengths {
-		end := offset + int(length)
-		if end > len(flatChain) {
-			return C.CString("invalid certificate chain layout")
-		}
-		rawCerts = append(rawCerts, flatChain[offset:end])
-		offset = end
-	}
-	err := verifyApplePinnedCertificateSHA256(flatHashes, rawCerts)
+	leafCertificate := C.GoBytes(unsafe.Pointer(leafCert), C.int(leafCertLen))
+	err := verifyApplePinnedCertificateSHA256(flatHashes, leafCertificate)
 	if err == nil {
 		return nil
 	}

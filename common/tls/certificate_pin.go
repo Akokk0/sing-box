@@ -10,30 +10,29 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
-// VerifyCertificateSHA256 pins the SHA-256 hash of a DER-encoded certificate. The whole chain
-// is scanned, so a fingerprint taken from an issuer also authorises the peer. Unparsable
-// entries are skipped so a malformed leaf cannot hide a pinned certificate below it.
+// VerifyCertificateSHA256 pins the SHA-256 hash of the peer's leaf certificate.
+//
+// Only the leaf is compared. Scanning the rest of the chain would not be a pin at all: a pin
+// turns off chain verification, so nothing links those entries to the leaf, and a server may
+// send whatever it likes there. An attacker holding an unrelated key could simply append the
+// pinned certificate — a public document anyone can fetch with `openssl s_client` — and be
+// waved through. Leaf-only is also what mihomo's `fingerprint` and the sibling
+// certificate_public_key_sha256 option compare.
 func VerifyCertificateSHA256(knownHashValues [][]byte, rawCerts [][]byte) error {
-	for _, rawCert := range rawCerts {
-		certificate, err := x509.ParseCertificate(rawCert)
-		if err != nil {
-			continue
-		}
-		hashValue := sha256.Sum256(certificate.Raw)
-		for _, value := range knownHashValues {
-			if bytes.Equal(value, hashValue[:]) {
-				return nil
-			}
+	if len(rawCerts) == 0 {
+		return E.New("no peer certificates")
+	}
+	leafCertificate, err := x509.ParseCertificate(rawCerts[0])
+	if err != nil {
+		return E.Cause(err, "failed to parse leaf certificate")
+	}
+	hashValue := sha256.Sum256(leafCertificate.Raw)
+	for _, value := range knownHashValues {
+		if bytes.Equal(value, hashValue[:]) {
+			return nil
 		}
 	}
-	if len(rawCerts) > 0 {
-		leafCertificate, err := x509.ParseCertificate(rawCerts[0])
-		if err == nil {
-			hashValue := sha256.Sum256(leafCertificate.Raw)
-			return E.New("unrecognized remote certificate: ", hex.EncodeToString(hashValue[:]))
-		}
-	}
-	return E.New("unrecognized remote certificate")
+	return E.New("unrecognized remote certificate: ", hex.EncodeToString(hashValue[:]))
 }
 
 // CertificatePins holds the pinning options of a client, which replace chain verification.

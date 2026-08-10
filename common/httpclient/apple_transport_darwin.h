@@ -71,13 +71,12 @@ char *box_apple_http_verify_public_key_sha256(
 	size_t leaf_cert_len
 );
 
-// Unlike the public-key pin, this one is matched against every certificate of the chain,
-// so the caller concatenates the whole chain and passes its per-entry lengths.
+// Hashes the whole DER certificate rather than its public key. Like the public-key pin it
+// speaks only for the leaf: a pin replaces chain verification, so nothing vouches for the
+// entries behind it.
 char *box_apple_http_verify_certificate_sha256(
 	uint8_t *known_hash_values,
 	size_t known_hash_values_len,
-	uint8_t *chain,
-	size_t chain_len,
-	size_t *chain_lengths,
-	size_t chain_count
+	uint8_t *leaf_cert,
+	size_t leaf_cert_len
 );

@@ -373,8 +373,12 @@ Colons, dashes and spaces are accepted as separators, so a fingerprint can be pa
 openssl, a browser or another client.
 
 When set, the certificate chain is not verified against certificate authorities: the peer is
-accepted if any certificate it presents matches one of the fingerprints. It therefore replaces
+accepted if the certificate it presents matches one of the fingerprints. It therefore replaces
 `certificate` / `certificate_path` for self-signed certificates, and conflicts with them.
+
+Only the leaf certificate is compared. Pinning an issuer would not work, and would not be safe
+if it did: with chain verification off, nothing ties the rest of the chain to the leaf, so any
+server could present the pinned certificate alongside its own.
 
 Unlike `certificate_public_key_sha256`, which hashes the public key of the leaf certificate,
 this option hashes the whole DER-encoded certificate. The two values are not interchangeable.

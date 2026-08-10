@@ -164,27 +164,20 @@ didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
 	}
 	if (ok && self.pinnedCertificateHashes.length > 0) {
 		CFArrayRef certificateChain = SecTrustCopyCertificateChain(trustRef);
-		CFIndex chainCount = certificateChain != NULL ? CFArrayGetCount(certificateChain) : 0;
-		if (chainCount == 0) {
+		SecCertificateRef leafCertificate = NULL;
+		if (certificateChain != NULL && CFArrayGetCount(certificateChain) > 0) {
+			leafCertificate = (SecCertificateRef)CFArrayGetValueAtIndex(certificateChain, 0);
+		}
+		if (leafCertificate == NULL) {
 			ok = NO;
 		} else {
-			NSMutableData *flatChain = [NSMutableData data];
-			size_t *chainLengths = calloc((size_t)chainCount, sizeof(size_t));
-			for (CFIndex index = 0; index < chainCount; index++) {
-				SecCertificateRef certificate = (SecCertificateRef)CFArrayGetValueAtIndex(certificateChain, index);
-				NSData *certificateData = CFBridgingRelease(SecCertificateCopyData(certificate));
-				chainLengths[index] = certificateData.length;
-				[flatChain appendData:certificateData];
-			}
+			NSData *leafData = CFBridgingRelease(SecCertificateCopyData(leafCertificate));
 			char *pinError = box_apple_http_verify_certificate_sha256(
 				(uint8_t *)self.pinnedCertificateHashes.bytes,
 				self.pinnedCertificateHashes.length,
-				(uint8_t *)flatChain.bytes,
-				flatChain.length,
-				chainLengths,
-				(size_t)chainCount
+				(uint8_t *)leafData.bytes,
+				leafData.length
 			);
-			free(chainLengths);
 			if (pinError != NULL) {
 				free(pinError);
 				ok = NO;

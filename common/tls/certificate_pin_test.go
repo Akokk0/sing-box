@@ -103,14 +103,16 @@ func TestVerifyCertificateSHA256RejectsUnknownFingerprint(t *testing.T) {
 	))
 }
 
-// mihomo scans the whole chain, so a fingerprint taken from an issuer also authorises the peer.
-func TestVerifyCertificateSHA256ScansWholeChain(t *testing.T) {
+// Only the leaf counts. A pin turns off chain verification, so nothing ties the remaining
+// entries to the leaf — accepting a match further down would let any server pass the pin by
+// appending the pinned certificate, which is a public document.
+func TestVerifyCertificateSHA256IgnoresTheRestOfTheChain(t *testing.T) {
 	t.Parallel()
 
 	leaf := generateTestCertificateDER(t, "leaf")
 	issuer := fixedCertificateDER(t)
 
-	require.NoError(t, tls.VerifyCertificateSHA256(
+	require.Error(t, tls.VerifyCertificateSHA256(
 		[][]byte{mustDecodeHex(t, fixedCertificateSHA256)},
 		[][]byte{leaf, issuer},
 	))
@@ -134,12 +136,12 @@ func TestVerifyCertificateSHA256RejectsEmptyChain(t *testing.T) {
 	))
 }
 
-// Unparsable entries are skipped rather than aborting the scan, so a malformed leaf cannot
-// hide a legitimately pinned certificate further down the chain.
-func TestVerifyCertificateSHA256SkipsUnparsableCertificates(t *testing.T) {
+// An unparsable leaf is a failure, not something to look past: the only certificate the pin
+// speaks for is the first one.
+func TestVerifyCertificateSHA256RejectsAnUnparsableLeaf(t *testing.T) {
 	t.Parallel()
 
-	require.NoError(t, tls.VerifyCertificateSHA256(
+	require.Error(t, tls.VerifyCertificateSHA256(
 		[][]byte{mustDecodeHex(t, fixedCertificateSHA256)},
 		[][]byte{[]byte("not a certificate"), fixedCertificateDER(t)},
 	))

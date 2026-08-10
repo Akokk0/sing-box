@@ -825,10 +825,13 @@ func TestAppleTransportLifecycle(t *testing.T) {
 	}
 }
 
-func startAppleHTTPTestServer(t *testing.T, handler http.HandlerFunc) *appleHTTPTestServer {
+// extraChainCertificates are appended behind the leaf, which is how a server smuggles a
+// certificate it does not hold the key for into the chain it presents.
+func startAppleHTTPTestServer(t *testing.T, handler http.HandlerFunc, extraChainCertificates ...[]byte) *appleHTTPTestServer {
 	t.Helper()
 
 	serverCertificate, serverCertificatePEM := newAppleHTTPTestCertificate(t, "localhost")
+	serverCertificate.Certificate = append(serverCertificate.Certificate, extraChainCertificates...)
 	server := httptest.NewUnstartedServer(handler)
 	server.EnableHTTP2 = true
 	server.TLS = &stdtls.Config{
@@ -1028,5 +1031,34 @@ func assertAppleHTTPSucceeds(t *testing.T, transport http.RoundTripper, rawURL s
 	defer response.Body.Close()
 	if body := readResponseBody(t, response); body != "ok" {
 		t.Fatalf("unexpected response body: %q", body)
+	}
+}
+
+// The same defect the STD engine had: the pinned certificate is public, and a pin turns off
+// chain verification, so an attacker holding an unrelated key must not pass by appending it.
+func TestAppleTransportPinnedCertificateRejectsSmuggledChainEntry(t *testing.T) {
+	pinnedCertificate, _ := newAppleHTTPTestCertificate(t, "localhost")
+	pinnedHash := certificateSHA256Hash(pinnedCertificate.Certificate[0])
+
+	server := startAppleHTTPTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}, pinnedCertificate.Certificate[0])
+
+	transport := newAppleHTTPTestTransport(t, server, option.HTTPClientOptions{
+		Version: 2,
+		OutboundTLSOptionsContainer: option.OutboundTLSOptionsContainer{
+			TLS: &option.OutboundTLSOptions{
+				Enabled:           true,
+				ServerName:        "localhost",
+				Insecure:          true,
+				CertificateSHA256: badoption.Listable[option.SHA256Fingerprint]{pinnedHash},
+			},
+		},
+	})
+
+	response, err := transport.RoundTrip(newAppleHTTPRequest(t, http.MethodGet, server.URL("/bad"), nil))
+	if err == nil {
+		response.Body.Close()
+		t.Fatal("expected a smuggled chain entry to be rejected")
 	}
 }

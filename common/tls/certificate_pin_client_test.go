@@ -153,3 +153,23 @@ func TestSTDClientRejectsFingerprintCombinedWithCertificate(t *testing.T) {
 	})
 	require.ErrorContains(t, err, "certificate_sha256")
 }
+
+// The pinned certificate is a public document — anyone can fetch it with `openssl s_client`.
+// Since a pin turns off chain verification, a server may put anything it likes behind the
+// leaf, so an attacker holding an unrelated key must not get through by simply appending the
+// pinned certificate to its own chain.
+func TestSTDClientHandshakeRejectsPinnedCertificateSmuggledIntoTheChain(t *testing.T) {
+	t.Parallel()
+
+	pinned := generateTestServerCertificate(t, "localhost")
+	attacker := generateTestServerCertificate(t, "localhost")
+	attacker.Certificate = append(attacker.Certificate, pinned.Certificate[0])
+	serverAddress := startTLSTestServer(t, attacker)
+
+	err := dialWithTLSOptions(t, serverAddress, option.OutboundTLSOptions{
+		Enabled:           true,
+		ServerName:        "localhost",
+		CertificateSHA256: badoption.Listable[option.SHA256Fingerprint]{fingerprintOf(pinned)},
+	})
+	require.ErrorContains(t, err, "unrecognized remote certificate")
+}
