@@ -1042,3 +1042,75 @@ func TestSubscriptionErrorsDoNotCarryTheURL(t *testing.T) {
 	// 主机还是要留的，否则连是哪份订阅出的问题都看不出来。
 	require.Contains(t, err.Error(), address)
 }
+
+// 一个组可以既写死几个出站、又从订阅取节点。两者是相加的关系：filter 管的是订阅
+// 送来的那批，配置里点名的那几个不受它约束，也不该因为订阅刷新过一次就消失。
+func TestGroupKeepsItsStaticMembersAlongsideSubscriptionNodes(t *testing.T) {
+	subscription := startSubscriptionServer(t, "proxies:\n"+
+		node("🇭🇰 Hong Kong 01", 10002)+
+		node("🇯🇵 Japan 01", 10003))
+
+	instance, ctx := startBox(t, option.Options{
+		Subscriptions: []option.Subscription{{Tag: "airport", URL: subscription.url}},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "direct"},
+			{Type: C.TypeSelector, Tag: "selector", Options: &option.SelectorOutboundOptions{
+				Outbounds:     []string{"direct"},
+				Subscriptions: []string{"airport"},
+				Filter: []option.GroupFilter{
+					{Action: "include", Keywords: []string{"🇭🇰"}},
+				},
+			}},
+			{Type: C.TypeURLTest, Tag: "urltest", Options: &option.URLTestOutboundOptions{
+				Outbounds:     []string{"direct"},
+				Subscriptions: []string{"airport"},
+				Filter: []option.GroupFilter{
+					{Action: "include", Keywords: []string{"🇭🇰"}},
+				},
+			}},
+		},
+	})
+
+	members := func(tag string) []string {
+		outbound, loaded := instance.Outbound().Outbound(tag)
+		require.True(t, loaded)
+		return outbound.(adapter.OutboundGroup).All()
+	}
+
+	// direct 是点名进来的，filter 只筛订阅那批，所以日本被排除、direct 留下。
+	require.Equal(t, []string{"direct", "🇭🇰 Hong Kong 01"}, members("selector"))
+	require.Equal(t, []string{"direct", "🇭🇰 Hong Kong 01"}, members("urltest"))
+
+	// 再刷新一次也不能把 direct 吃掉——第一版正是在这一步丢的。
+	subscription.serve("proxies:\n" + node("🇭🇰 Hong Kong 02", 10004))
+	airport, _ := service.FromContext[adapter.SubscriptionManager](ctx).Subscription("airport")
+	require.NoError(t, airport.Update())
+
+	require.Equal(t, []string{"direct", "🇭🇰 Hong Kong 02"}, members("selector"))
+	require.Equal(t, []string{"direct", "🇭🇰 Hong Kong 02"}, members("urltest"))
+}
+
+// 两份订阅给出同名节点时，组里只能算一个：重复成员会在面板上显示两遍，也会让
+// urltest 把同一个出站测两次。
+func TestGroupDoesNotListAMemberTwice(t *testing.T) {
+	first := startSubscriptionServer(t, "proxies:\n"+node("\U0001F1ED\U0001F1F0 Hong Kong 01", 10002))
+	second := startSubscriptionServer(t, "proxies:\n"+node("\U0001F1ED\U0001F1F0 Hong Kong 01", 10002)+node("\U0001F1EF\U0001F1F5 Japan 01", 10003))
+
+	instance, _ := startBox(t, option.Options{
+		Subscriptions: []option.Subscription{
+			{Tag: "airport-a", URL: first.url},
+			{Tag: "airport-b", URL: second.url},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "direct"},
+			{Type: C.TypeSelector, Tag: "selector", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport-a", "airport-b"},
+			}},
+		},
+	})
+
+	outbound, loaded := instance.Outbound().Outbound("selector")
+	require.True(t, loaded)
+	require.Equal(t, []string{"\U0001F1ED\U0001F1F0 Hong Kong 01", "\U0001F1EF\U0001F1F5 Japan 01"},
+		outbound.(adapter.OutboundGroup).All())
+}

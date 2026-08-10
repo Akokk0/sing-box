@@ -37,12 +37,14 @@ var (
 
 type URLTest struct {
 	outbound.Adapter
-	ctx                          context.Context
-	outbound                     adapter.OutboundManager
-	connection                   adapter.ConnectionManager
-	logger                       log.ContextLogger
-	access                       sync.RWMutex
-	tags                         []string
+	ctx        context.Context
+	outbound   adapter.OutboundManager
+	connection adapter.ConnectionManager
+	logger     log.ContextLogger
+	access     sync.RWMutex
+	tags       []string
+	// staticTags 是配置里点名的那几个。tags 会被订阅刷新整体换掉，这一份不会。
+	staticTags                   []string
 	subscriptions                []string
 	filter                       []option.GroupFilter
 	link                         string
@@ -61,6 +63,7 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
 		connection:                   service.FromContext[adapter.ConnectionManager](ctx),
 		logger:                       logger,
 		tags:                         options.Outbounds,
+		staticTags:                   options.Outbounds,
 		subscriptions:                options.Subscriptions,
 		filter:                       options.Filter,
 		link:                         options.URL,
@@ -158,7 +161,7 @@ func (s *URLTest) SetSubscriptionNodes(tags []string) error {
 	if err != nil {
 		return err
 	}
-	return s.SetMembers(selected)
+	return s.SetMembers(mergeMembers(s.staticTags, selected))
 }
 
 func (s *URLTest) URLTest(ctx context.Context) (map[string]uint16, error) {

@@ -40,8 +40,11 @@ type Selector struct {
 	logger     logger.ContextLogger
 	// access 只护住成员表。数据面（DialContext / NewConnection）读的是 selected，
 	// 那是个原子值——换成员不该给每一次拨号都加上一把锁。
-	access                       sync.RWMutex
-	tags                         []string
+	access sync.RWMutex
+	tags   []string
+	// staticTags 是配置里点名的那几个。tags 会被订阅刷新整体换掉，这一份不会——
+	// 少了它，第一次刷新就会把用户写在 outbounds 里的成员悄悄吃掉。
+	staticTags                   []string
 	subscriptions                []string
 	filter                       []option.GroupFilter
 	defaultTag                   string
@@ -60,6 +63,7 @@ func NewSelector(ctx context.Context, router adapter.Router, logger log.ContextL
 		connection:                   service.FromContext[adapter.ConnectionManager](ctx),
 		logger:                       logger,
 		tags:                         options.Outbounds,
+		staticTags:                   options.Outbounds,
 		subscriptions:                options.Subscriptions,
 		filter:                       options.Filter,
 		defaultTag:                   options.Default,
@@ -274,7 +278,7 @@ func (s *Selector) SetSubscriptionNodes(tags []string) error {
 	if err != nil {
 		return err
 	}
-	return s.SetMembers(selected)
+	return s.SetMembers(mergeMembers(s.staticTags, selected))
 }
 
 func RealTag(detour adapter.Outbound) string {
