@@ -8,20 +8,6 @@ import (
 	"unicode/utf8"
 )
 
-// looksLikeClashSubscription 判断这份内容到底是不是一份 clash 订阅。
-//
-// 机场按 User-Agent 决定返回什么：认出 clash 就给 clash yaml，认不出常给 base64 那种
-// 订阅，也可能干脆是登录页或限流页。把那些东西交给 YAML 解析器，用户只会收到一句词法
-// 错误加一个行号，对着它完全无从下手——而真正该做的是换个 user_agent。
-func looksLikeClashSubscription(content []byte) bool {
-	for line := range bytes.Lines(content) {
-		if bytes.HasPrefix(bytes.TrimSpace(line), []byte("proxies:")) {
-			return true
-		}
-	}
-	return false
-}
-
 var yamlLinePattern = regexp.MustCompile(`line (\d+):`)
 
 // excerptAround 把出问题的那几行摘出来附在错误后面。
@@ -75,29 +61,34 @@ func redactSecrets(line string) string {
 	return redacted
 }
 
-// proxiesBlock 从一份 mihomo 配置里把 proxies 段整块切出来，切不到则返回 nil。
+// proxiesBlock 从一份 mihomo 配置里把 proxies 段整块切出来，并报告文档里有几个 proxies 段。
+//
+// 段数是调用方分辨三种局面的依据，一次扫描就够：0 个说明拿到的根本不是 clash 订阅
+// （机场没认出 User-Agent，给了 base64 订阅或一张登录页）；1 个才切；多于 1 个不切——
+// 切出来的那一份看着完整，实际只是其中一半，少掉的那些会被当成「机场撤掉了这些节点」
+// 把出站摘掉，组瞬间缩水。整份失败反而什么都不动，上一次的好状态原样保住。
 //
 // 订阅是一份完整的 mihomo 配置，而我们只要 proxies。其余段落由机场生成，坏掉是常事——
 // 现场遇到过一个空的 hosts 段（两行只有个冒号），它让整份订阅解析失败，节点一个都拿不到。
 // 为一个我们从不读的段落赔上全部节点，等于让路由器断网。
 //
-// 按文本切而不是按 YAML 切，正是因为这时候整份文档已经解析不了了。clash 订阅的结构很规整：
+// 按文本切而不是按 YAML 切，正是因为这时候整份文档已经解析不了了：yaml.v3 的语法错误是
+// panic 出来的，整个解码栈被展开，没有半棵节点树可供抢救。clash 订阅的结构很规整：
 // 顶层键顶格写，段落内容缩进。切到下一个顶格键为止就够了。
-func proxiesBlock(content []byte) []byte {
+func proxiesBlock(content []byte) (block []byte, sections int) {
 	lines := bytes.Split(bytes.ReplaceAll(content, []byte("\r\n"), []byte("\n")), []byte("\n"))
-	var starts []int
+	start := -1
 	for index, line := range lines {
 		if bytes.HasPrefix(line, []byte("proxies:")) {
-			starts = append(starts, index)
+			sections++
+			if start < 0 {
+				start = index
+			}
 		}
 	}
-	// 不是恰好一个 proxies 段就不回退。切出来的那一份看着完整，实际只是其中一半——
-	// 少掉的那些会被当成「机场撤掉了这些节点」把出站摘掉，组瞬间缩水。整份失败反而
-	// 什么都不动，上一次的好状态原样保住。
-	if len(starts) != 1 {
-		return nil
+	if sections != 1 {
+		return nil, sections
 	}
-	start := starts[0]
 	end := len(lines)
 	for index := start + 1; index < len(lines); index++ {
 		if isTopLevelKey(lines[index]) {
@@ -105,7 +96,7 @@ func proxiesBlock(content []byte) []byte {
 			break
 		}
 	}
-	return bytes.Join(lines[start:end], []byte("\n"))
+	return bytes.Join(lines[start:end], []byte("\n")), sections
 }
 
 // isTopLevelKey 判断这一行是不是又一个顶格的段落开头。
@@ -113,12 +104,12 @@ func proxiesBlock(content []byte) []byte {
 // 空行、注释、以及任何缩进了的行都属于当前段落。顶格的 `- ` 也是：那是顶层序列的一项，
 // clash 配置里不会出现，但真出现了也不该被当成新段落的开头。
 func isTopLevelKey(line []byte) bool {
-	trimmed := bytes.TrimRight(line, " \t")
-	if len(trimmed) == 0 {
+	if len(line) == 0 {
 		return false
 	}
-	if trimmed[0] == ' ' || trimmed[0] == '\t' || trimmed[0] == '#' || trimmed[0] == '-' {
+	switch line[0] {
+	case ' ', '\t', '#', '-':
 		return false
 	}
-	return bytes.Contains(trimmed, []byte(":"))
+	return bytes.Contains(line, []byte(":"))
 }

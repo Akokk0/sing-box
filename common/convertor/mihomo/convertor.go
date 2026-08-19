@@ -8,6 +8,7 @@ package mihomo
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"strconv"
 
@@ -18,6 +19,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Result 是一次转换的全部产出：出站，加上转换过程想告诉调用方的事。
+//
+// Skipped 和 Warnings 分开是因为粒度不同：前者是「这个节点没转成」，一条一个节点；
+// 后者是关于整份订阅的，比如「整份文档解析不了，只读了 proxies 段」。
+type Result struct {
+	Outbounds []option.Outbound
+	Skipped   []string
+	Warnings  []string
+}
+
 // ToOptions 把订阅内容转成出站配置。
 //
 // 转不了的节点被跳过并记进 skipped，而不是让整份订阅报废——机场加一个尚未支持的协议
@@ -26,23 +37,24 @@ import (
 //
 // 整份内容解析不了则返回错误。那通常意味着拿到的根本不是订阅（机场返回的登录页或
 // 限流页），这时候绝不能当成「零个节点」——那会把配置清空，等于断网。
-func ToOptions(ctx context.Context, content []byte) (outbounds []option.Outbound, skipped []string, warnings []string, err error) {
+func ToOptions(ctx context.Context, content []byte) (Result, error) {
 	proxies, warnings, err := parseProxies(content)
 	if err != nil {
-		return nil, nil, nil, err
+		return Result{}, err
 	}
 	if len(proxies) == 0 {
-		return nil, nil, nil, E.New("subscription contains no proxies")
+		return Result{}, E.New("subscription contains no proxies")
 	}
+	result := Result{Warnings: warnings}
 	for _, proxy := range proxies {
 		outbound, convertErr := convert(ctx, proxy)
 		if convertErr != nil {
-			skipped = append(skipped, convertErr.Error())
+			result.Skipped = append(result.Skipped, convertErr.Error())
 			continue
 		}
-		outbounds = append(outbounds, outbound)
+		result.Outbounds = append(result.Outbounds, outbound)
 	}
-	return outbounds, skipped, warnings, nil
+	return result, nil
 }
 
 // parseProxies 取出订阅里的 proxies 段。
@@ -60,20 +72,21 @@ func parseProxies(content []byte) ([]map[string]any, []string, error) {
 	if err == nil {
 		return subscription.Proxies, nil, nil
 	}
-	if !looksLikeClashSubscription(content) {
+	block, sections := proxiesBlock(content)
+	if sections == 0 {
 		// 报 YAML 词法错误在这里是帮倒忙：内容压根不是 clash 订阅，行号指向的东西
 		// 毫无意义。多半是机场没认出 User-Agent，给了 base64 订阅或一张登录页。
 		return nil, nil, E.New("not a clash subscription: no proxies section in the response; " +
 			"the airport likely served another format, try setting user_agent")
 	}
-	block := proxiesBlock(content)
 	if block == nil || yaml.Unmarshal(block, &subscription) != nil {
 		// 坏的就是 proxies 段本身，没有任何东西可以信任。报原始错误——它的行号是相对
 		// 整份文件的，用户能对得上。
-		// 摘录放在 cause 之后：E.Cause 的格式是 "<message>: <cause>"，把摘录当 message
+		// 用 %w 而不是 E.Cause：E.Cause 的格式是 "<message>: <cause>"，把摘录当 message
 		// 传进去，yaml 的报错就会拼在最后一行摘录的屁股后面，读起来像是订阅的那一行里
-		// 写着这句报错——正是这个诊断本该消除的误解。
-		return nil, nil, E.New("parse subscription: ", err.Error(), excerptAround(content, err.Error()))
+		// 写着这句报错——正是这个诊断本该消除的误解。%w 既能精确排版，又保住了 Unwrap，
+		// errors.Is / errors.As 仍够得到底层那个 yaml 错误。
+		return nil, nil, fmt.Errorf("parse subscription: %w%s", err, excerptAround(content, err.Error()))
 	}
 	return subscription.Proxies, []string{
 		"the subscription does not parse as a whole (" + err.Error() +

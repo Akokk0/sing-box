@@ -121,6 +121,9 @@ The time limit for one fetch, `30s` by default.
 
 The `User-Agent` to send. Go's default is used if empty.
 
+If `http_client.headers` also carries a `User-Agent`, that one wins — it is applied when the
+request goes out and overwrites this. Set one or the other, not both.
+
 Airports often pick a format from this header. The default is deliberately left alone: an
 airport that works today is quite possibly returning Clash YAML precisely because it did not
 recognise the client. Set it only when an airport demands a name it knows.

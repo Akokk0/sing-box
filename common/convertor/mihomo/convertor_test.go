@@ -67,11 +67,11 @@ func outboundByTag(t *testing.T, outbounds []option.Outbound, tag string) option
 
 func TestToOptions(t *testing.T) {
 	ctx := include.Context(context.Background())
-	outbounds, skipped, _, err := mihomo.ToOptions(ctx, []byte(subscription))
+	result, err := mihomo.ToOptions(ctx, []byte(subscription))
 	require.NoError(t, err)
 
 	t.Run("anytls", func(t *testing.T) {
-		outbound := outboundByTag(t, outbounds, "🇭🇰 Hong Kong 01")
+		outbound := outboundByTag(t, result.Outbounds, "🇭🇰 Hong Kong 01")
 		require.Equal(t, C.TypeAnyTLS, outbound.Type)
 		options := outbound.Options.(*option.AnyTLSOutboundOptions)
 		require.Equal(t, "hk1.example.invalid", options.Server)
@@ -95,7 +95,7 @@ func TestToOptions(t *testing.T) {
 	})
 
 	t.Run("shadowsocks", func(t *testing.T) {
-		outbound := outboundByTag(t, outbounds, "🇯🇵 Japan 02")
+		outbound := outboundByTag(t, result.Outbounds, "🇯🇵 Japan 02")
 		require.Equal(t, C.TypeShadowsocks, outbound.Type)
 		options := outbound.Options.(*option.ShadowsocksOutboundOptions)
 		require.Equal(t, "jp2.example.invalid", options.Server)
@@ -106,7 +106,7 @@ func TestToOptions(t *testing.T) {
 	})
 
 	t.Run("trojan", func(t *testing.T) {
-		outbound := outboundByTag(t, outbounds, "🇸🇬 Singapore 03")
+		outbound := outboundByTag(t, result.Outbounds, "🇸🇬 Singapore 03")
 		require.Equal(t, C.TypeTrojan, outbound.Type)
 		options := outbound.Options.(*option.TrojanOutboundOptions)
 		require.Equal(t, "sg3.example.invalid", options.Server)
@@ -120,10 +120,10 @@ func TestToOptions(t *testing.T) {
 	// 转不了的节点不能让整份订阅报废——那会把用户钉在旧配置上。但必须报出名字，
 	// 否则机场换协议时节点悄悄少一批，事后无从查起。
 	t.Run("unsupported protocols are named, not fatal", func(t *testing.T) {
-		require.Len(t, outbounds, 3)
-		require.Len(t, skipped, 1)
-		require.Contains(t, skipped[0], "🇺🇸 United States 04")
-		require.Contains(t, skipped[0], "hysteria2")
+		require.Len(t, result.Outbounds, 3)
+		require.Len(t, result.Skipped, 1)
+		require.Contains(t, result.Skipped[0], "🇺🇸 United States 04")
+		require.Contains(t, result.Skipped[0], "hysteria2")
 	})
 }
 
@@ -131,7 +131,7 @@ func TestToOptions(t *testing.T) {
 // 这时候必须失败，绝不能当成「零个节点」把配置清空。
 func TestToOptionsRejectsSomethingThatIsNotASubscription(t *testing.T) {
 	ctx := include.Context(context.Background())
-	_, _, _, err := mihomo.ToOptions(ctx, []byte("<html><body>403 Forbidden</body></html>"))
+	_, err := mihomo.ToOptions(ctx, []byte("<html><body>403 Forbidden</body></html>"))
 	require.Error(t, err)
 }
 
@@ -142,7 +142,7 @@ func TestToOptionsRejectsSomethingThatIsNotASubscription(t *testing.T) {
 // WeaklyTypedInput，"443" 照样当 443 用；我们直接丢给 option 反序列化的话，
 // uint16 收到字符串就报错，整个节点被静默跳过。
 func TestToOptionsAcceptsAQuotedPort(t *testing.T) {
-	outbounds, skipped, _, err := mihomo.ToOptions(include.Context(context.Background()), []byte(`
+	result, err := mihomo.ToOptions(include.Context(context.Background()), []byte(`
 proxies:
   - name: "quoted"
     type: ss
@@ -152,14 +152,14 @@ proxies:
     password: FAKE-PASSWORD-NOT-REAL
 `))
 	require.NoError(t, err)
-	require.Empty(t, skipped)
-	require.Len(t, outbounds, 1)
-	require.Equal(t, uint16(8388), outbounds[0].Options.(*option.ShadowsocksOutboundOptions).ServerPort)
+	require.Empty(t, result.Skipped)
+	require.Len(t, result.Outbounds, 1)
+	require.Equal(t, uint16(8388), result.Outbounds[0].Options.(*option.ShadowsocksOutboundOptions).ServerPort)
 }
 
 // 端口根本不是个数时必须照旧跳过并说明原因，不能悄悄变成 0。
 func TestToOptionsSkipsANonNumericPort(t *testing.T) {
-	outbounds, skipped, _, err := mihomo.ToOptions(include.Context(context.Background()), []byte(`
+	result, err := mihomo.ToOptions(include.Context(context.Background()), []byte(`
 proxies:
   - name: "broken"
     type: ss
@@ -169,9 +169,9 @@ proxies:
     password: FAKE-PASSWORD-NOT-REAL
 `))
 	require.NoError(t, err)
-	require.Empty(t, outbounds)
-	require.Len(t, skipped, 1)
-	require.Contains(t, skipped[0], "broken")
+	require.Empty(t, result.Outbounds)
+	require.Len(t, result.Skipped, 1)
+	require.Contains(t, result.Skipped[0], "broken")
 }
 
 // 机场按 User-Agent 决定返回什么：认出 clash 就给 clash yaml，认不出就常给 base64 那种
@@ -181,7 +181,7 @@ func TestToOptionsSaysSoWhenTheResponseIsNotAClashSubscription(t *testing.T) {
 	ctx := include.Context(context.Background())
 	// base64 订阅：一堆看着像 YAML 又不是 YAML 的行。
 	body := strings.Repeat("dm1lc3M6Ly9leUpoWkdRaU9pSXhMakl1TXk0MElpd2ljRzl5ZENJNk5EUXpmUT09\n", 60)
-	_, _, _, err := mihomo.ToOptions(ctx, []byte(body))
+	_, err := mihomo.ToOptions(ctx, []byte(body))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not a clash subscription",
 		"应当直说拿到的不是 clash 订阅，而不是甩一句 YAML 词法错误")
@@ -199,7 +199,7 @@ func TestToOptionsShowsTheOffendingLinesWithoutLeakingSecrets(t *testing.T) {
 	// 缩进少一格：野生订阅里最常见的坏法，报出来的正是 "did not find expected key"。
 	body.WriteString(" - {name: \"the-broken-one\", type: anytls, server: 1.1.1.1, port: 443, password: SUPER-SECRET-VALUE}\n")
 
-	_, _, _, err := mihomo.ToOptions(include.Context(context.Background()), []byte(body.String()))
+	_, err := mihomo.ToOptions(include.Context(context.Background()), []byte(body.String()))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "did not find expected key")
 	require.Contains(t, err.Error(), "the-broken-one", "要把出问题的那几行带出来")
@@ -231,11 +231,11 @@ proxies:
     port: 443
     password: FAKE-PASSWORD-NOT-REAL
 `
-	outbounds, _, warnings, err := mihomo.ToOptions(include.Context(context.Background()), []byte(content))
+	result, err := mihomo.ToOptions(include.Context(context.Background()), []byte(content))
 	require.NoError(t, err, "坏在 hosts 段里，不该拖垮 proxies")
-	require.Len(t, outbounds, 1)
-	require.Equal(t, "JP 01", outbounds[0].Tag)
-	require.NotEmpty(t, warnings, "退而求其次地只解析了 proxies 段，这件事必须说出来")
+	require.Len(t, result.Outbounds, 1)
+	require.Equal(t, "JP 01", result.Outbounds[0].Tag)
+	require.NotEmpty(t, result.Warnings, "退而求其次地只解析了 proxies 段，这件事必须说出来")
 }
 
 // 但坏在 proxies 段里就是另一回事了：那时候没有任何东西可以信任，必须失败，
@@ -247,7 +247,7 @@ proxies:
   - {name: "ok", type: anytls, server: 127.0.0.1, port: 443}
  - {name: "bad indent", type: anytls, server: 127.0.0.1, port: 443}
 `
-	_, _, _, err := mihomo.ToOptions(include.Context(context.Background()), []byte(content))
+	_, err := mihomo.ToOptions(include.Context(context.Background()), []byte(content))
 	require.Error(t, err)
 }
 
@@ -266,11 +266,11 @@ hosts:
 rules:
   - MATCH,DIRECT
 `
-	outbounds, _, warnings, err := mihomo.ToOptions(include.Context(context.Background()), []byte(content))
+	result, err := mihomo.ToOptions(include.Context(context.Background()), []byte(content))
 	require.NoError(t, err, "坏在 proxies 后面的 hosts 段里，同样不该拖垮 proxies")
-	require.Len(t, outbounds, 1)
-	require.Equal(t, "JP 01", outbounds[0].Tag)
-	require.NotEmpty(t, warnings)
+	require.Len(t, result.Outbounds, 1)
+	require.Equal(t, "JP 01", result.Outbounds[0].Tag)
+	require.NotEmpty(t, result.Warnings)
 }
 
 // 回退只解析 proxies 段这一招有个陷阱：切出来的那一份看着是完整的，实际可能只是其中一半。
@@ -282,9 +282,9 @@ func TestToOptionsRefusesToRecoverHalfOfADuplicatedProxiesSection(t *testing.T) 
 		"  - {name: \"JP 01\", type: anytls, server: 127.0.0.1, port: 10001, password: FAKE}\n" +
 		"proxies:\n" +
 		"  - {name: \"HK 01\", type: anytls, server: 127.0.0.1, port: 10002, password: FAKE}\n"
-	outbounds, _, _, err := mihomo.ToOptions(include.Context(context.Background()), []byte(content))
+	result, err := mihomo.ToOptions(include.Context(context.Background()), []byte(content))
 	require.Error(t, err, "只切到一半的节点表绝不能当成成功")
-	require.Empty(t, outbounds)
+	require.Empty(t, result.Outbounds)
 }
 
 // 摘录是要进日志的，而节点名几乎都是 emoji 和中文。按字节截断会切出半个字符，
@@ -298,7 +298,7 @@ func TestToOptionsExcerptStaysValidUTF8(t *testing.T) {
 	}
 	body.WriteString(" - {name: \"bad indent\", type: anytls, server: 1.1.1.1, port: 443}\n")
 
-	_, _, _, err := mihomo.ToOptions(include.Context(context.Background()), []byte(body.String()))
+	_, err := mihomo.ToOptions(include.Context(context.Background()), []byte(body.String()))
 	require.Error(t, err)
 	require.True(t, utf8.ValidString(err.Error()), "摘录被按字节截断，切出了半个字符")
 }
@@ -310,7 +310,7 @@ func TestToOptionsKeepsTheCauseOffTheLastExcerptLine(t *testing.T) {
   - {name: "ok", type: anytls, server: 127.0.0.1, port: 443}
  - {name: "bad indent", type: anytls, server: 127.0.0.1, port: 443}
 `
-	_, _, _, err := mihomo.ToOptions(include.Context(context.Background()), []byte(content))
+	_, err := mihomo.ToOptions(include.Context(context.Background()), []byte(content))
 	require.Error(t, err)
 	for line := range strings.SplitSeq(err.Error(), "\n") {
 		if strings.Contains(line, " | ") && strings.Contains(line, "yaml:") {

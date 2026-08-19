@@ -30,7 +30,8 @@ const (
 	initialRetryDelay = 10 * time.Second
 	// outageRetryCap 是「一个节点都没有」时退避的上限。
 	outageRetryCap = 5 * time.Minute
-	// retryShiftLimit 只是给翻倍循环一个明确的止境，避免连续失败很多次后做无谓的空转。
+	// retryShiftLimit 是移位的止境：失败次数无上限，而 10s << 20 已经是 121 天，
+	// 再往上移只会溢出。
 	retryShiftLimit = 20
 )
 
@@ -156,26 +157,27 @@ func (s *Subscription) Start() error {
 			}
 		}
 	}
-	if len(s.Nodes()) == 0 {
-		// 一个节点都没有，组是空的，路由无处可去——这一次必须当场拉，哪怕要等。
-		if err = s.Update(); err != nil {
+	// 两条路都是「拉一次、失败记一笔、把结果交给循环当起始失败次数」，差别只在这一次
+	// 拉取要不要挡住启动。
+	firstUpdate := func() error {
+		err := s.Update()
+		if err != nil {
 			// 起不来也要让箱子跑起来：其余出站和规则照常工作，组暂时是空的。
 			s.logger.Error("initial update: ", err)
 		}
-		go s.loop(err)
+		return err
+	}
+	if len(s.Nodes()) == 0 {
+		// 一个节点都没有，组是空的，路由无处可去——这一次必须当场拉，哪怕要等。
+		updateErr := firstUpdate()
+		go s.loop(updateErr)
 		return nil
 	}
 	// 存档已经把节点供上了，箱子可以立刻跑起来，新的在后台拉。
 	//
 	// 不拉是不行的：那等于把订阅冻结到下一个 interval（默认一整天）。机场半夜换了密码，
 	// 开机时装上的那批节点已经全废，却要到第二天这个点才会去问一次。
-	go func() {
-		updateErr := s.Update()
-		if updateErr != nil {
-			s.logger.Error("initial update: ", updateErr)
-		}
-		s.loop(updateErr)
-	}()
+	go func() { s.loop(firstUpdate()) }()
 	return nil
 }
 
@@ -225,17 +227,7 @@ func (s *Subscription) nextDelay(failures int) time.Duration {
 	if len(s.Nodes()) == 0 && limit > outageRetryCap {
 		limit = outageRetryCap
 	}
-	delay := initialRetryDelay
-	for range min(failures-1, retryShiftLimit) {
-		delay *= 2
-		if delay >= limit {
-			return limit
-		}
-	}
-	if delay > limit {
-		return limit
-	}
-	return delay
+	return min(initialRetryDelay<<min(failures-1, retryShiftLimit), limit)
 }
 
 // Update 拉一次订阅并应用。
@@ -329,24 +321,25 @@ func (s *Subscription) applyAsOf(content []byte, asOf time.Time) error {
 		return nil
 	}
 
-	outbounds, skipped, warnings, err := mihomo.ToOptions(s.ctx, content)
+	result, err := mihomo.ToOptions(s.ctx, content)
 	if err != nil {
 		return err
 	}
 	// 先把警告打出来，再判断有没有可用节点：一个都没转出来时最需要线索，而
 	// 「整份文档解析不了、只读了 proxies 段」正是那条线索。挡在下面就等于丢掉它。
-	for _, warning := range warnings {
+	for _, warning := range result.Warnings {
 		s.logger.Warn(warning)
 	}
-	if len(outbounds) == 0 {
+	if len(result.Outbounds) == 0 {
 		// 一个都没转出来就装上去等于把所有组清空，那和断网没区别。
-		return E.New("no usable node out of ", len(outbounds)+len(skipped), " in the subscription")
+		return E.New("no usable node out of ", len(result.Skipped), " in the subscription")
 	}
-	if len(skipped) > 0 && !s.options.ExcludeSkipped {
-		for _, reason := range skipped {
+	if !s.options.ExcludeSkipped {
+		for _, reason := range result.Skipped {
 			s.logger.Warn("skipped: ", reason)
 		}
 	}
+	outbounds := result.Outbounds
 
 	tags := make([]string, 0, len(outbounds))
 	for _, outbound := range outbounds {

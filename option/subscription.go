@@ -36,6 +36,9 @@ type Subscription struct {
 	// 机场常按这个头决定返回什么格式：认出 clash 就给 clash yaml，认出别的客户端就给
 	// 别的。默认刻意不改——正在工作的机场很可能就是因为没认出我们才给的 clash yaml，
 	// 报上名号反而可能换来一份我们解析不了的东西。换了挑 UA 的机场时再设这一项。
+	//
+	// HTTPClient.Headers 里若也写了 User-Agent，以那一份为准：它是在发请求时统一贴上去
+	// 的，会盖掉这里设的值。两处都写没有意义，挑一处即可。
 	UserAgent string `json:"user_agent,omitempty"`
 	// Path 是本地存档：启动时先用它把节点立刻装上，再去拉新的。
 	// 路由器开机时网络往往还没通，而这份订阅正是连上网所需要的东西。
