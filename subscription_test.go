@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,6 +23,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing/common"
+	"github.com/sagernet/sing/common/json/badjson"
 	"github.com/sagernet/sing/common/json/badoption"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -1267,4 +1269,63 @@ func TestListingOutboundsIsSafeDuringASubscriptionUpdate(t *testing.T) {
 		t.Fatalf("outbound %q was listed twice, so the slice was rewritten mid-read", tag)
 	default:
 	}
+}
+
+// 订阅是自举用的：箱子起不来时更新订阅是唯一的自救手段。拨号已经不绕回箱子了，
+// 域名解析却还在回落到 route.default_domain_resolver——那台 DNS 要是得靠订阅节点
+// 才出得去，环就闭合了。http_client 让这份订阅自带一个不依赖代理的解析器。
+func TestSubscriptionResolvesItsURLWithoutTheProxy(t *testing.T) {
+	subscription := startSubscriptionServer(t, "proxies:\n"+node("🇭🇰 Hong Kong 01", 10002))
+	parsed, err := url.Parse(subscription.url)
+	require.NoError(t, err)
+
+	predefined := &badjson.TypedMap[string, badoption.Listable[netip.Addr]]{}
+	predefined.Put("airport.example", badoption.Listable[netip.Addr]{netip.MustParseAddr("127.0.0.1")})
+
+	_, ctx := startBox(t, option.Options{
+		DNS: &option.DNSOptions{RawDNSOptions: option.RawDNSOptions{
+			Servers: []option.DNSServerOptions{
+				{
+					Type: C.DNSTypeHosts, Tag: "bootstrap",
+					Options: &option.HostsDNSServerOptions{Predefined: predefined},
+				},
+				{
+					// 默认解析器要靠代理才出得去——正是死锁的形状。
+					Type: C.DNSTypeUDP, Tag: "viaProxy",
+					Options: &option.RemoteDNSServerOptions{
+						RawLocalDNSServerOptions: option.RawLocalDNSServerOptions{
+							DialerOptions: option.DialerOptions{Detour: "proxy"},
+						},
+						DNSServerAddressOptions: option.DNSServerAddressOptions{Server: "8.8.8.8"},
+					},
+				},
+			},
+		}},
+		Subscriptions: []option.Subscription{{
+			Tag: "airport",
+			// 用域名而不是 IP，才会真的走一次域名解析。
+			URL:             "http://airport.example:" + parsed.Port() + "/sub",
+			DownloadTimeout: badoption.Duration(5 * time.Second),
+			HTTPClient: &option.HTTPClientOptions{
+				DialerOptions: option.DialerOptions{
+					AbstractDialerOptions: option.AbstractDialerOptions{
+						DomainResolver: &option.DomainResolveOptions{Server: "bootstrap"},
+					},
+				},
+			},
+		}},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "direct"},
+			{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport"},
+			}},
+		},
+		Route: &option.RouteOptions{
+			DefaultDomainResolver: &option.DomainResolveOptions{Server: "viaProxy"},
+		},
+	})
+
+	airport, loaded := service.FromContext[adapter.SubscriptionManager](ctx).Subscription("airport")
+	require.True(t, loaded)
+	require.Equal(t, []string{"🇭🇰 Hong Kong 01"}, airport.Nodes())
 }

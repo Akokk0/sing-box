@@ -19,7 +19,7 @@ icon: material/new-box
       "url": "https://example.com/api/v1/client/subscribe?token=",
       "format": "mihomo",
       "interval": "24h",
-      "download_detour": "",
+      "http_client": {},
       "download_timeout": "30s",
       "user_agent": "",
       "path": "/etc/sing-box/airport.yaml",
@@ -74,12 +74,27 @@ proxy provider 的形式呈现。
 
 内容与上一次逐字节相同的更新不会碰任何出站。
 
-#### download_detour
+#### http_client
 
-用哪个出站去拉订阅，默认直连。
+拉订阅用的 HTTP 客户端：出站（`detour`）、域名解析器（`domain_resolver`）、TLS 都在这里定，
+也可以直接写一个已命名客户端的 tag。参见 [HTTP 客户端](/zh/configuration/shared/http-client/)。
 
-留空通常是对的：其它路都不通的时候，更新订阅是唯一的自救手段，而把这个请求绕回一个由该订阅
-自己供给的策略组，启动时就是死锁。
+`detour` 留空通常是对的：其它路都不通的时候，更新订阅是唯一的自救手段，而把这个请求绕回一个
+由该订阅自己供给的策略组，启动时就是死锁。
+
+`domain_resolver` 要同样小心，而且更容易踩：不填时，订阅地址的域名会交给
+`route.default_domain_resolver` 去解析，而那台 DNS 常常正是要靠代理才出得去的那一台。此时一旦
+删掉本地存档，环就闭合了——域名解析不出来，节点补不回来，于是域名还是解析不出来。把它指到一个
+不依赖代理的解析器上：
+
+```json
+{
+  "url": "https://example.org/subscribe?token=...",
+  "http_client": {
+    "domain_resolver": "local-resolver"
+  }
+}
+```
 
 #### download_timeout
 

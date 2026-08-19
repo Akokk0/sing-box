@@ -17,9 +17,14 @@ type Subscription struct {
 	Format string `json:"format,omitempty" enum:"mihomo"`
 	// Interval 是自动更新间隔，默认 24 小时。内容没变时整轮更新不会碰任何出站。
 	Interval badoption.Duration `json:"interval,omitempty"`
-	// DownloadDetour 指定用哪个出站去拉订阅。留空表示直连——sing-box 起不来的时候
-	// 更新订阅是唯一的自救手段，这时候再绕回自己就是死锁。
-	DownloadDetour string `json:"download_detour,omitempty"`
+	// HTTPClient 是拉订阅用的 HTTP 客户端：出站（detour）、域名解析器
+	// （domain_resolver）、TLS 都在这里定，也可以直接写一个已命名客户端的 tag。
+	//
+	// 留空表示直连 + 用 route.default_domain_resolver 解析——sing-box 起不来的时候
+	// 更新订阅是唯一的自救手段，这时候再绕回自己就是死锁。默认解析器本身要靠代理才
+	// 出得去时（常见写法），这一项必须填一个不依赖代理的 domain_resolver，否则
+	// 本地存档一丢，域名就再也解析不出来，节点永远补不回来。
+	HTTPClient *HTTPClientOptions `json:"http_client,omitempty"`
 	// DownloadTimeout 是单次拉取的时限，默认 30 秒。
 	//
 	// 不能没有：更新循环是单个 goroutine，一次挂住的请求会把它永久钉在那里，

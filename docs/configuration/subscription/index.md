@@ -21,7 +21,7 @@ through them are not interrupted.
       "url": "https://example.com/api/v1/client/subscribe?token=",
       "format": "mihomo",
       "interval": "24h",
-      "download_detour": "",
+      "http_client": {},
       "download_timeout": "30s",
       "user_agent": "",
       "path": "/etc/sing-box/airport.yaml",
@@ -77,13 +77,29 @@ How often to fetch, `24h` by default. The minimum is `1m`.
 
 An update whose content is byte-identical to the last one touches no outbound at all.
 
-#### download_detour
+#### http_client
 
-The outbound to fetch through. Direct by default.
+The HTTP client used to fetch. Set the outbound (`detour`), the resolver (`domain_resolver`)
+and TLS here, or name an existing client by its tag. See [HTTP Client](/configuration/shared/http-client/).
 
-Leaving it empty is usually right: updating the subscription is the only way out when nothing
-else works, and routing that request back through a group the subscription itself supplies
-deadlocks at startup.
+Leaving `detour` empty is usually right: updating the subscription is the only way out when
+nothing else works, and routing that request back through a group the subscription itself
+supplies deadlocks at startup.
+
+`domain_resolver` needs the same care, and it is the easier one to get wrong. With it unset
+the subscription's hostname is resolved through `route.default_domain_resolver` — commonly a
+DNS server that itself only works through the proxy. Delete the local archive and the loop
+closes: the name cannot be resolved, so the nodes never arrive, so the name still cannot be
+resolved. Point it at a resolver that does not depend on the proxy:
+
+```json
+{
+  "url": "https://example.org/subscribe?token=...",
+  "http_client": {
+    "domain_resolver": "local-resolver"
+  }
+}
+```
 
 #### download_timeout
 

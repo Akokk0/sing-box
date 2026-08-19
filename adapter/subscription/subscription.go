@@ -15,6 +15,7 @@ import (
 	"github.com/sagernet/sing-box/common/convertor/mihomo"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/service"
 )
@@ -347,8 +348,11 @@ func (s *Subscription) resolveTransport() (adapter.HTTPTransport, error) {
 	// 刻意不用 DefaultTransport：那个是走箱子自己的路由的。默认路由指向一个由订阅供给的
 	// 组时，启动那一刻它还空着——请求想出去得先有节点，节点却要靠这个请求拉回来，箱子
 	// 永远起不来。detour 留空 + DisableEmptyDirectCheck 得到的才是真正的直连拨号。
-	return httpClientManager.ResolveTransport(s.ctx, s.logger, option.HTTPClientOptions{
-		DialerOptions:           option.DialerOptions{Detour: s.options.DownloadDetour},
-		DisableEmptyDirectCheck: true,
-	})
+	//
+	// 域名解析是另一条腿：不填 domain_resolver 时它回落到 route.default_domain_resolver，
+	// 而那台 DNS 往往正是要靠代理才出得去的那一台，环照样会闭合。http_client 让用户把
+	// 这条腿也指到不依赖代理的地方去。
+	options := common.PtrValueOrDefault(s.options.HTTPClient)
+	options.DisableEmptyDirectCheck = true
+	return httpClientManager.ResolveTransport(s.ctx, s.logger, options)
 }

@@ -17128,8 +17128,8 @@
         "interval": {
           "$ref": "#/$defs/Duration"
         },
-        "download_detour": {
-          "type": "string"
+        "http_client": {
+          "$ref": "#/$defs/HTTPClientReference"
         },
         "download_timeout": {
           "$ref": "#/$defs/Duration"
