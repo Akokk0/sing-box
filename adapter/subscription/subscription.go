@@ -329,13 +329,16 @@ func (s *Subscription) applyAsOf(content []byte, asOf time.Time) error {
 		return nil
 	}
 
-	outbounds, skipped, err := mihomo.ToOptions(s.ctx, content)
+	outbounds, skipped, warnings, err := mihomo.ToOptions(s.ctx, content)
 	if err != nil {
 		return err
 	}
 	if len(outbounds) == 0 {
 		// 一个都没转出来就装上去等于把所有组清空，那和断网没区别。
 		return E.New("no usable node out of ", len(outbounds)+len(skipped), " in the subscription")
+	}
+	for _, warning := range warnings {
+		s.logger.Warn(warning)
 	}
 	if len(skipped) > 0 && !s.options.ExcludeSkipped {
 		for _, reason := range skipped {

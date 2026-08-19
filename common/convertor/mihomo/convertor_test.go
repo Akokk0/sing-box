@@ -66,7 +66,7 @@ func outboundByTag(t *testing.T, outbounds []option.Outbound, tag string) option
 
 func TestToOptions(t *testing.T) {
 	ctx := include.Context(context.Background())
-	outbounds, skipped, err := mihomo.ToOptions(ctx, []byte(subscription))
+	outbounds, skipped, _, err := mihomo.ToOptions(ctx, []byte(subscription))
 	require.NoError(t, err)
 
 	t.Run("anytls", func(t *testing.T) {
@@ -130,7 +130,7 @@ func TestToOptions(t *testing.T) {
 // 这时候必须失败，绝不能当成「零个节点」把配置清空。
 func TestToOptionsRejectsSomethingThatIsNotASubscription(t *testing.T) {
 	ctx := include.Context(context.Background())
-	_, _, err := mihomo.ToOptions(ctx, []byte("<html><body>403 Forbidden</body></html>"))
+	_, _, _, err := mihomo.ToOptions(ctx, []byte("<html><body>403 Forbidden</body></html>"))
 	require.Error(t, err)
 }
 
@@ -141,7 +141,7 @@ func TestToOptionsRejectsSomethingThatIsNotASubscription(t *testing.T) {
 // WeaklyTypedInput，"443" 照样当 443 用；我们直接丢给 option 反序列化的话，
 // uint16 收到字符串就报错，整个节点被静默跳过。
 func TestToOptionsAcceptsAQuotedPort(t *testing.T) {
-	outbounds, skipped, err := mihomo.ToOptions(include.Context(context.Background()), []byte(`
+	outbounds, skipped, _, err := mihomo.ToOptions(include.Context(context.Background()), []byte(`
 proxies:
   - name: "quoted"
     type: ss
@@ -158,7 +158,7 @@ proxies:
 
 // 端口根本不是个数时必须照旧跳过并说明原因，不能悄悄变成 0。
 func TestToOptionsSkipsANonNumericPort(t *testing.T) {
-	outbounds, skipped, err := mihomo.ToOptions(include.Context(context.Background()), []byte(`
+	outbounds, skipped, _, err := mihomo.ToOptions(include.Context(context.Background()), []byte(`
 proxies:
   - name: "broken"
     type: ss
@@ -180,7 +180,7 @@ func TestToOptionsSaysSoWhenTheResponseIsNotAClashSubscription(t *testing.T) {
 	ctx := include.Context(context.Background())
 	// base64 订阅：一堆看着像 YAML 又不是 YAML 的行。
 	body := strings.Repeat("dm1lc3M6Ly9leUpoWkdRaU9pSXhMakl1TXk0MElpd2ljRzl5ZENJNk5EUXpmUT09\n", 60)
-	_, _, err := mihomo.ToOptions(ctx, []byte(body))
+	_, _, _, err := mihomo.ToOptions(ctx, []byte(body))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not a clash subscription",
 		"应当直说拿到的不是 clash 订阅，而不是甩一句 YAML 词法错误")
@@ -198,9 +198,76 @@ func TestToOptionsShowsTheOffendingLinesWithoutLeakingSecrets(t *testing.T) {
 	// 缩进少一格：野生订阅里最常见的坏法，报出来的正是 "did not find expected key"。
 	body.WriteString(" - {name: \"the-broken-one\", type: anytls, server: 1.1.1.1, port: 443, password: SUPER-SECRET-VALUE}\n")
 
-	_, _, err := mihomo.ToOptions(include.Context(context.Background()), []byte(body.String()))
+	_, _, _, err := mihomo.ToOptions(include.Context(context.Background()), []byte(body.String()))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "did not find expected key")
 	require.Contains(t, err.Error(), "the-broken-one", "要把出问题的那几行带出来")
 	require.NotContains(t, err.Error(), "SUPER-SECRET-VALUE", "密码不能进日志")
+}
+
+// 机场返回的是一份完整的 mihomo 配置，而我们只看 proxies 段。其余段落是机场自己生成的，
+// 坏掉是常事——真实现场就撞上过一个空的 hosts 段：
+//
+//	hosts:
+//	  :
+//	  :
+//
+// yaml.v3 在那两行空键上停住，整份订阅报废，节点一个都拿不到，路由器全网断掉。为了一个
+// 我们从不读的段落赔上整份订阅，没有任何道理。
+func TestToOptionsSurvivesGarbageOutsideTheProxiesSection(t *testing.T) {
+	content := `dns:
+  fake-ip-filter:
+    - 'localhost.ptlogin2.qq.com'
+    - '*.msftncsi.com'
+hosts:
+  : 
+  : 
+
+proxies:
+  - name: "JP 01"
+    type: anytls
+    server: 127.0.0.1
+    port: 443
+    password: FAKE-PASSWORD-NOT-REAL
+`
+	outbounds, _, warnings, err := mihomo.ToOptions(include.Context(context.Background()), []byte(content))
+	require.NoError(t, err, "坏在 hosts 段里，不该拖垮 proxies")
+	require.Len(t, outbounds, 1)
+	require.Equal(t, "JP 01", outbounds[0].Tag)
+	require.NotEmpty(t, warnings, "退而求其次地只解析了 proxies 段，这件事必须说出来")
+}
+
+// 但坏在 proxies 段里就是另一回事了：那时候没有任何东西可以信任，必须失败，
+// 绝不能当成「机场撤掉了所有节点」把配置清空。
+func TestToOptionsStillFailsWhenTheProxiesSectionItselfIsBroken(t *testing.T) {
+	content := `hosts:
+  : 
+proxies:
+  - {name: "ok", type: anytls, server: 127.0.0.1, port: 443}
+ - {name: "bad indent", type: anytls, server: 127.0.0.1, port: 443}
+`
+	_, _, _, err := mihomo.ToOptions(include.Context(context.Background()), []byte(content))
+	require.Error(t, err)
+}
+
+// 坏掉的段落也可能排在 proxies 后面。切 proxies 段时必须在下一个顶格键处收手，
+// 一路切到文件末尾就会把后面那坨坏东西一起带上，等于白退这一步。
+func TestToOptionsSurvivesGarbageAfterTheProxiesSection(t *testing.T) {
+	content := `proxies:
+  - name: "JP 01"
+    type: anytls
+    server: 127.0.0.1
+    port: 443
+    password: FAKE-PASSWORD-NOT-REAL
+hosts:
+  : 
+  : 
+rules:
+  - MATCH,DIRECT
+`
+	outbounds, _, warnings, err := mihomo.ToOptions(include.Context(context.Background()), []byte(content))
+	require.NoError(t, err, "坏在 proxies 后面的 hosts 段里，同样不该拖垮 proxies")
+	require.Len(t, outbounds, 1)
+	require.Equal(t, "JP 01", outbounds[0].Tag)
+	require.NotEmpty(t, warnings)
 }

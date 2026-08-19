@@ -1428,3 +1428,41 @@ func TestEndToEndEmptyRegionGroupRecoversAfterTheAirportComesBack(t *testing.T) 
 	// filter 只放日本节点进来，香港那个不该出现。
 	require.Equal(t, []string{"🇯🇵 Japan 01"}, jp.(adapter.OutboundGroup).All())
 }
+
+// 机场当天返回的真实形状：空的 hosts 段排在 proxies 前面。修复前这份订阅整个报废，
+// 组全空，路由器断网。
+func TestRealAirportShapeWithAnEmptyHostsSection(t *testing.T) {
+	body := `mixed-port: 7890
+dns:
+  fake-ip-filter:
+    - 'localhost.ptlogin2.qq.com'
+    - '*.msftncsi.com'
+    - 'www.msftconnecttest.com'
+hosts:
+  : 
+  : 
+
+proxies:
+` + node("Traffic Reset：20 Days Left", 10001) +
+		node("🇯🇵 Japan 01", 10002) +
+		node("🇭🇰 Hong Kong 01", 10003) + `
+rules:
+  - MATCH,DIRECT
+`
+	subscription := startSubscriptionServer(t, body)
+	_, ctx := startBox(t, option.Options{
+		Subscriptions: []option.Subscription{{Tag: "airport", URL: subscription.url}},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "direct"},
+			{Type: C.TypeURLTest, Tag: "🌸 JP", Options: &option.URLTestOutboundOptions{
+				Subscriptions: []string{"airport"},
+				Filter: []option.GroupFilter{{
+					Action: "include", Keywords: []string{"🇯🇵|JP|jp|日本|日|Japan"},
+				}},
+			}},
+		},
+	})
+	airport, loaded := service.FromContext[adapter.SubscriptionManager](ctx).Subscription("airport")
+	require.True(t, loaded)
+	require.Len(t, airport.Nodes(), 3, "三个节点都该拿到，hosts 段坏了不影响")
+}

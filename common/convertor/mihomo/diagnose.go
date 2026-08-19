@@ -71,3 +71,48 @@ func redactSecrets(line string) string {
 	}
 	return redacted
 }
+
+// proxiesBlock 从一份 mihomo 配置里把 proxies 段整块切出来，切不到则返回 nil。
+//
+// 订阅是一份完整的 mihomo 配置，而我们只要 proxies。其余段落由机场生成，坏掉是常事——
+// 现场遇到过一个空的 hosts 段（两行只有个冒号），它让整份订阅解析失败，节点一个都拿不到。
+// 为一个我们从不读的段落赔上全部节点，等于让路由器断网。
+//
+// 按文本切而不是按 YAML 切，正是因为这时候整份文档已经解析不了了。clash 订阅的结构很规整：
+// 顶层键顶格写，段落内容缩进。切到下一个顶格键为止就够了。
+func proxiesBlock(content []byte) []byte {
+	lines := bytes.Split(bytes.ReplaceAll(content, []byte("\r\n"), []byte("\n")), []byte("\n"))
+	start := -1
+	for index, line := range lines {
+		if bytes.HasPrefix(line, []byte("proxies:")) {
+			start = index
+			break
+		}
+	}
+	if start < 0 {
+		return nil
+	}
+	end := len(lines)
+	for index := start + 1; index < len(lines); index++ {
+		if isTopLevelKey(lines[index]) {
+			end = index
+			break
+		}
+	}
+	return bytes.Join(lines[start:end], []byte("\n"))
+}
+
+// isTopLevelKey 判断这一行是不是又一个顶格的段落开头。
+//
+// 空行、注释、以及任何缩进了的行都属于当前段落。顶格的 `- ` 也是：那是顶层序列的一项，
+// clash 配置里不会出现，但真出现了也不该被当成新段落的开头。
+func isTopLevelKey(line []byte) bool {
+	trimmed := bytes.TrimRight(line, " \t")
+	if len(trimmed) == 0 {
+		return false
+	}
+	if trimmed[0] == ' ' || trimmed[0] == '\t' || trimmed[0] == '#' || trimmed[0] == '-' {
+		return false
+	}
+	return bytes.Contains(trimmed, []byte(":"))
+}

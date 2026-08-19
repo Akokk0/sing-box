@@ -26,23 +26,15 @@ import (
 //
 // 整份内容解析不了则返回错误。那通常意味着拿到的根本不是订阅（机场返回的登录页或
 // 限流页），这时候绝不能当成「零个节点」——那会把配置清空，等于断网。
-func ToOptions(ctx context.Context, content []byte) (outbounds []option.Outbound, skipped []string, err error) {
-	var subscription struct {
-		Proxies []map[string]any `yaml:"proxies"`
+func ToOptions(ctx context.Context, content []byte) (outbounds []option.Outbound, skipped []string, warnings []string, err error) {
+	proxies, warnings, err := parseProxies(content)
+	if err != nil {
+		return nil, nil, nil, err
 	}
-	if err = yaml.Unmarshal(content, &subscription); err != nil {
-		if !looksLikeClashSubscription(content) {
-			// 报 YAML 词法错误在这里是帮倒忙：内容压根不是 clash 订阅，行号指向的东西
-			// 毫无意义。多半是机场没认出 User-Agent，给了 base64 订阅或一张登录页。
-			return nil, nil, E.New("not a clash subscription: no proxies section in the response; " +
-				"the airport likely served another format, try setting user_agent")
-		}
-		return nil, nil, E.Cause(err, "parse subscription", excerptAround(content, err.Error()))
+	if len(proxies) == 0 {
+		return nil, nil, nil, E.New("subscription contains no proxies")
 	}
-	if len(subscription.Proxies) == 0 {
-		return nil, nil, E.New("subscription contains no proxies")
-	}
-	for _, proxy := range subscription.Proxies {
+	for _, proxy := range proxies {
 		outbound, convertErr := convert(ctx, proxy)
 		if convertErr != nil {
 			skipped = append(skipped, convertErr.Error())
@@ -50,7 +42,40 @@ func ToOptions(ctx context.Context, content []byte) (outbounds []option.Outbound
 		}
 		outbounds = append(outbounds, outbound)
 	}
-	return outbounds, skipped, nil
+	return outbounds, skipped, warnings, nil
+}
+
+// parseProxies 取出订阅里的 proxies 段。
+//
+// 先整份解析——那是正常情况，也保住了 YAML 该有的语义。失败时才退一步，只把 proxies
+// 段单独切出来再解析一次：机场生成的 hosts / rules / dns 那些段落坏掉，不该连累我们
+// 唯一要读的东西。
+//
+// 退这一步的前提是「已经失败了」，所以它伤不到正常的订阅：走到这里时另一条路已经断了。
+func parseProxies(content []byte) ([]map[string]any, []string, error) {
+	var subscription struct {
+		Proxies []map[string]any `yaml:"proxies"`
+	}
+	err := yaml.Unmarshal(content, &subscription)
+	if err == nil {
+		return subscription.Proxies, nil, nil
+	}
+	if !looksLikeClashSubscription(content) {
+		// 报 YAML 词法错误在这里是帮倒忙：内容压根不是 clash 订阅，行号指向的东西
+		// 毫无意义。多半是机场没认出 User-Agent，给了 base64 订阅或一张登录页。
+		return nil, nil, E.New("not a clash subscription: no proxies section in the response; " +
+			"the airport likely served another format, try setting user_agent")
+	}
+	block := proxiesBlock(content)
+	if block == nil || yaml.Unmarshal(block, &subscription) != nil {
+		// 坏的就是 proxies 段本身，没有任何东西可以信任。报原始错误——它的行号是相对
+		// 整份文件的，用户能对得上。
+		return nil, nil, E.Cause(err, "parse subscription", excerptAround(content, err.Error()))
+	}
+	return subscription.Proxies, []string{
+		"the subscription does not parse as a whole (" + err.Error() +
+			"); read the proxies section alone, everything else in it was ignored",
+	}, nil
 }
 
 func convert(ctx context.Context, proxy map[string]any) (option.Outbound, error) {
