@@ -1370,3 +1370,61 @@ func TestSubscriptionResolvesItsURLWithoutTheProxy(t *testing.T) {
 	require.True(t, loaded)
 	require.Equal(t, []string{"🇭🇰 Hong Kong 01"}, airport.Nodes())
 }
+
+// 复刻真实路由器上的拓扑：地区组是 urltest + filter，成员全靠订阅供给；本地存档被删掉，
+// 开机时机场还连不上。日志里那句 urltest[🌸 JP]: missing supported outbound 就是这个状态。
+// 修复之后它必须自己好起来。
+func TestEndToEndEmptyRegionGroupRecoversAfterTheAirportComesBack(t *testing.T) {
+	port := reservePort(t)
+	address := "127.0.0.1:" + strconv.Itoa(int(port))
+
+	instance, _ := startBox(t, option.Options{
+		Subscriptions: []option.Subscription{{
+			Tag:             "airport",
+			URL:             "http://" + address + "/sub",
+			Interval:        badoption.Duration(24 * time.Hour), // 主人配置里的值
+			DownloadTimeout: badoption.Duration(time.Second),
+		}},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "☄️ DIRECT"},
+			{Type: C.TypeURLTest, Tag: "🌸 JP", Options: &option.URLTestOutboundOptions{
+				Subscriptions: []string{"airport"},
+				Filter: []option.GroupFilter{{
+					Action: "include", Keywords: badoption.Listable[string]{"🇯🇵|JP|jp|日本|日|Japan"},
+				}},
+			}},
+			{Type: C.TypeSelector, Tag: "🚀 NODE SELECTION", Options: &option.SelectorOutboundOptions{
+				Outbounds: []string{"🌸 JP", "☄️ DIRECT"},
+				Default:   "🌸 JP",
+			}},
+		},
+		Route: &option.RouteOptions{Final: "🚀 NODE SELECTION"},
+	})
+
+	jp, loaded := instance.Outbound().Outbound("🌸 JP")
+	require.True(t, loaded)
+	require.Empty(t, jp.(adapter.OutboundGroup).All(), "机场还没通，地区组应当是空的")
+
+	// 正是日志里那句报错。
+	_, err := jp.DialContext(t.Context(), "tcp", M.ParseSocksaddr("104.244.42.197:443"))
+	require.ErrorContains(t, err, "missing supported outbound")
+
+	// 机场恢复了。
+	listener, listenErr := net.Listen("tcp", address)
+	require.NoError(t, listenErr)
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("proxies:\n" +
+			node("🇯🇵 Japan 01", 10002) +
+			node("🇭🇰 Hong Kong 01", 10003)))
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+
+	require.Eventually(t, func() bool {
+		return len(jp.(adapter.OutboundGroup).All()) > 0
+	}, 60*time.Second, 200*time.Millisecond,
+		"订阅重试成功后，filter 应当把日本节点挑进 🌸 JP，组自己恢复")
+
+	// filter 只放日本节点进来，香港那个不该出现。
+	require.Equal(t, []string{"🇯🇵 Japan 01"}, jp.(adapter.OutboundGroup).All())
+}
