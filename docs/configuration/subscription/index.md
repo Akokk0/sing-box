@@ -77,6 +77,11 @@ How often to fetch, `24h` by default. The minimum is `1m`.
 
 An update whose content is byte-identical to the last one touches no outbound at all.
 
+A *failed* fetch does not wait this long. It retries after 10s, then doubles on each further
+failure, capped at `interval` — or at 5 minutes for as long as there is not a single node,
+since that means every group is empty and nothing routes anywhere. A router that boots before
+its uplink is up would otherwise sit dead until tomorrow.
+
 #### http_client
 
 The HTTP client used to fetch. Set the outbound (`detour`), the resolver (`domain_resolver`)

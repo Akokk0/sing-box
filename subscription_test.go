@@ -1271,6 +1271,47 @@ func TestListingOutboundsIsSafeDuringASubscriptionUpdate(t *testing.T) {
 	}
 }
 
+// 路由器开机时网络往往还没通——Start 里那句注释自己就是这么写的。首拉失败之后必须
+// 尽快再试：等满一个 interval（真实配置里是 24 小时）等于让箱子空着组过一天，而组一空，
+// 走代理的那台 DNS 也跟着废，整机断网且不会自愈。
+func TestSubscriptionRetriesSoonAfterAFailedFirstFetch(t *testing.T) {
+	port := reservePort(t)
+	address := "127.0.0.1:" + strconv.Itoa(int(port))
+
+	_, ctx := startBox(t, option.Options{
+		Subscriptions: []option.Subscription{{
+			Tag: "airport",
+			URL: "http://" + address + "/sub",
+			// 真实配置就是这个量级。重试若按它走，等于一天不动。
+			Interval:        badoption.Duration(time.Hour),
+			DownloadTimeout: badoption.Duration(time.Second),
+		}},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "direct"},
+			{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{
+				Subscriptions: []string{"airport"},
+			}},
+		},
+	})
+
+	airport, loaded := service.FromContext[adapter.SubscriptionManager](ctx).Subscription("airport")
+	require.True(t, loaded)
+	require.Empty(t, airport.Nodes(), "首拉必定失败：这个端口上还没人监听")
+
+	// 网络通了。
+	listener, err := net.Listen("tcp", address)
+	require.NoError(t, err)
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("proxies:\n" + node("🇭🇰 Hong Kong 01", 10002)))
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+
+	require.Eventually(t, func() bool {
+		return len(airport.Nodes()) > 0
+	}, 90*time.Second, 200*time.Millisecond, "网络恢复后订阅应当自己重试，而不是等满 interval")
+}
+
 // 订阅是自举用的：箱子起不来时更新订阅是唯一的自救手段。拨号已经不绕回箱子了，
 // 域名解析却还在回落到 route.default_domain_resolver——那台 DNS 要是得靠订阅节点
 // 才出得去，环就闭合了。http_client 让这份订阅自带一个不依赖代理的解析器。

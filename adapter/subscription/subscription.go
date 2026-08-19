@@ -24,6 +24,16 @@ import (
 // 一般的 HTTP 请求宽一些。
 const defaultDownloadTimeout = 30 * time.Second
 
+const (
+	// initialRetryDelay 是第一次失败之后等多久再试。给得短：要救的正是「路由器开机时
+	// 网络还没通」那一下，而那种情况下网络往往几秒内就上来了。
+	initialRetryDelay = 10 * time.Second
+	// outageRetryCap 是「一个节点都没有」时退避的上限。
+	outageRetryCap = 5 * time.Minute
+	// retryShiftLimit 只是给翻倍循环一个明确的止境，避免连续失败很多次后做无谓的空转。
+	retryShiftLimit = 20
+)
+
 var _ adapter.Subscription = (*Subscription)(nil)
 
 // Subscription 是一份订阅。
@@ -152,7 +162,7 @@ func (s *Subscription) Start() error {
 			// 起不来也要让箱子跑起来：其余出站和规则照常工作，组暂时是空的。
 			s.logger.Error("initial update: ", err)
 		}
-		go s.loop()
+		go s.loop(err)
 		return nil
 	}
 	// 存档已经把节点供上了，箱子可以立刻跑起来，新的在后台拉。
@@ -160,10 +170,11 @@ func (s *Subscription) Start() error {
 	// 不拉是不行的：那等于把订阅冻结到下一个 interval（默认一整天）。机场半夜换了密码，
 	// 开机时装上的那批节点已经全废，却要到第二天这个点才会去问一次。
 	go func() {
-		if err := s.Update(); err != nil {
-			s.logger.Error("initial update: ", err)
+		updateErr := s.Update()
+		if updateErr != nil {
+			s.logger.Error("initial update: ", updateErr)
 		}
-		s.loop()
+		s.loop(updateErr)
 	}()
 	return nil
 }
@@ -173,19 +184,58 @@ func (s *Subscription) Close() error {
 	return nil
 }
 
-func (s *Subscription) loop() {
-	ticker := time.NewTicker(s.interval)
-	defer ticker.Stop()
+// loop 按 nextDelay 给出的间隔反复拉取。initialErr 是首次拉取的结果：它必须带进来，
+// 否则首拉失败后这里会从「零次失败」起算，又变回等满一个 interval。
+func (s *Subscription) loop(initialErr error) {
+	var failures int
+	if initialErr != nil {
+		failures = 1
+	}
+	timer := time.NewTimer(s.nextDelay(failures))
+	defer timer.Stop()
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-ticker.C:
-			if err := s.Update(); err != nil {
-				s.logger.Error("update: ", err)
-			}
+		case <-timer.C:
+		}
+		if err := s.Update(); err != nil {
+			failures++
+			s.logger.Error("update: ", err)
+		} else {
+			failures = 0
+		}
+		timer.Reset(s.nextDelay(failures))
+	}
+}
+
+// nextDelay 决定下一次拉取要等多久。
+//
+// 顺利时就是配置的 interval。失败之后不能再等满一个 interval：真实配置里那是 24 小时，
+// 而路由器开机时网络往往还没通——首拉必定失败，于是箱子要空着组过一整天。空组意味着
+// 走代理的那台 DNS 也一起废掉，整机断网且不会自愈。
+//
+// 所以失败后从 10 秒起指数退避，避免机场故障时把请求打成风暴。封顶取 interval，
+// 但一个节点都没有时压到 5 分钟：那是整机断网，等更久没有道理，而这个请求本身很小。
+func (s *Subscription) nextDelay(failures int) time.Duration {
+	if failures <= 0 {
+		return s.interval
+	}
+	limit := s.interval
+	if len(s.Nodes()) == 0 && limit > outageRetryCap {
+		limit = outageRetryCap
+	}
+	delay := initialRetryDelay
+	for range min(failures-1, retryShiftLimit) {
+		delay *= 2
+		if delay >= limit {
+			return limit
 		}
 	}
+	if delay > limit {
+		return limit
+	}
+	return delay
 }
 
 // Update 拉一次订阅并应用。
