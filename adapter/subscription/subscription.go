@@ -333,12 +333,14 @@ func (s *Subscription) applyAsOf(content []byte, asOf time.Time) error {
 	if err != nil {
 		return err
 	}
+	// 先把警告打出来，再判断有没有可用节点：一个都没转出来时最需要线索，而
+	// 「整份文档解析不了、只读了 proxies 段」正是那条线索。挡在下面就等于丢掉它。
+	for _, warning := range warnings {
+		s.logger.Warn(warning)
+	}
 	if len(outbounds) == 0 {
 		// 一个都没转出来就装上去等于把所有组清空，那和断网没区别。
 		return E.New("no usable node out of ", len(outbounds)+len(skipped), " in the subscription")
-	}
-	for _, warning := range warnings {
-		s.logger.Warn(warning)
 	}
 	if len(skipped) > 0 && !s.options.ExcludeSkipped {
 		for _, reason := range skipped {

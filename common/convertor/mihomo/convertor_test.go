@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/sagernet/sing-box/common/convertor/mihomo"
 	C "github.com/sagernet/sing-box/constant"
@@ -270,4 +271,50 @@ rules:
 	require.Len(t, outbounds, 1)
 	require.Equal(t, "JP 01", outbounds[0].Tag)
 	require.NotEmpty(t, warnings)
+}
+
+// 回退只解析 proxies 段这一招有个陷阱：切出来的那一份看着是完整的，实际可能只是其中一半。
+// 机场模板把 proxies 拼了两次时，整份文档因重复键解析失败，而回退切到第二个 proxies 就
+// 收手了——于是后一半节点凭空消失，还会被当成「机场撤掉了这些节点」把出站摘掉。
+// 宁可整份失败保住上一次的好状态，也不能悄悄少给一半。
+func TestToOptionsRefusesToRecoverHalfOfADuplicatedProxiesSection(t *testing.T) {
+	content := "proxies:\n" +
+		"  - {name: \"JP 01\", type: anytls, server: 127.0.0.1, port: 10001, password: FAKE}\n" +
+		"proxies:\n" +
+		"  - {name: \"HK 01\", type: anytls, server: 127.0.0.1, port: 10002, password: FAKE}\n"
+	outbounds, _, _, err := mihomo.ToOptions(include.Context(context.Background()), []byte(content))
+	require.Error(t, err, "只切到一半的节点表绝不能当成成功")
+	require.Empty(t, outbounds)
+}
+
+// 摘录是要进日志的，而节点名几乎都是 emoji 和中文。按字节截断会切出半个字符，
+// 让整条日志变成非法 UTF-8。
+func TestToOptionsExcerptStaysValidUTF8(t *testing.T) {
+	var body strings.Builder
+	body.WriteString("proxies:\n")
+	longName := "🇯🇵 " + strings.Repeat("日", 120)
+	for range 3 {
+		fmt.Fprintf(&body, "  - {name: %q, type: anytls, server: 1.1.1.1, port: 443, password: SECRET}\n", longName)
+	}
+	body.WriteString(" - {name: \"bad indent\", type: anytls, server: 1.1.1.1, port: 443}\n")
+
+	_, _, _, err := mihomo.ToOptions(include.Context(context.Background()), []byte(body.String()))
+	require.Error(t, err)
+	require.True(t, utf8.ValidString(err.Error()), "摘录被按字节截断，切出了半个字符")
+}
+
+// yaml 的错误必须自成一行。作为 message 传给 E.Cause 时它会被拼到最后一行摘录的屁股后面，
+// 读起来就像「订阅的第 N 行里写着这句报错」——正是这个诊断本该消除的误解。
+func TestToOptionsKeepsTheCauseOffTheLastExcerptLine(t *testing.T) {
+	content := `proxies:
+  - {name: "ok", type: anytls, server: 127.0.0.1, port: 443}
+ - {name: "bad indent", type: anytls, server: 127.0.0.1, port: 443}
+`
+	_, _, _, err := mihomo.ToOptions(include.Context(context.Background()), []byte(content))
+	require.Error(t, err)
+	for line := range strings.SplitSeq(err.Error(), "\n") {
+		if strings.Contains(line, " | ") && strings.Contains(line, "yaml:") {
+			t.Fatalf("yaml 错误被拼进了摘录行: %q", line)
+		}
+	}
 }

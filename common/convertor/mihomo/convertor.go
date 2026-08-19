@@ -70,7 +70,10 @@ func parseProxies(content []byte) ([]map[string]any, []string, error) {
 	if block == nil || yaml.Unmarshal(block, &subscription) != nil {
 		// 坏的就是 proxies 段本身，没有任何东西可以信任。报原始错误——它的行号是相对
 		// 整份文件的，用户能对得上。
-		return nil, nil, E.Cause(err, "parse subscription", excerptAround(content, err.Error()))
+		// 摘录放在 cause 之后：E.Cause 的格式是 "<message>: <cause>"，把摘录当 message
+		// 传进去，yaml 的报错就会拼在最后一行摘录的屁股后面，读起来像是订阅的那一行里
+		// 写着这句报错——正是这个诊断本该消除的误解。
+		return nil, nil, E.New("parse subscription: ", err.Error(), excerptAround(content, err.Error()))
 	}
 	return subscription.Proxies, []string{
 		"the subscription does not parse as a whole (" + err.Error() +

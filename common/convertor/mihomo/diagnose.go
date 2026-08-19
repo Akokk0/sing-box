@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // looksLikeClashSubscription 判断这份内容到底是不是一份 clash 订阅。
@@ -65,9 +66,11 @@ var secretValuePattern = regexp.MustCompile(`(?i)\b(password|passwd|uuid|psk|tok
 // 日志会被翻出来看、会被贴进 issue、会被发给别人。
 func redactSecrets(line string) string {
 	redacted := secretValuePattern.ReplaceAllString(line, "${1}${2}[redacted]")
+	// 按字符截断而不是按字节：节点名几乎都是 emoji 和中文，砍在字节上会切出半个字符，
+	// 整条日志跟着变成非法 UTF-8。
 	const limit = 200
-	if len(redacted) > limit {
-		return redacted[:limit] + "…"
+	if utf8.RuneCountInString(redacted) > limit {
+		return string([]rune(redacted)[:limit]) + "…"
 	}
 	return redacted
 }
@@ -82,16 +85,19 @@ func redactSecrets(line string) string {
 // 顶层键顶格写，段落内容缩进。切到下一个顶格键为止就够了。
 func proxiesBlock(content []byte) []byte {
 	lines := bytes.Split(bytes.ReplaceAll(content, []byte("\r\n"), []byte("\n")), []byte("\n"))
-	start := -1
+	var starts []int
 	for index, line := range lines {
 		if bytes.HasPrefix(line, []byte("proxies:")) {
-			start = index
-			break
+			starts = append(starts, index)
 		}
 	}
-	if start < 0 {
+	// 不是恰好一个 proxies 段就不回退。切出来的那一份看着完整，实际只是其中一半——
+	// 少掉的那些会被当成「机场撤掉了这些节点」把出站摘掉，组瞬间缩水。整份失败反而
+	// 什么都不动，上一次的好状态原样保住。
+	if len(starts) != 1 {
 		return nil
 	}
+	start := starts[0]
 	end := len(lines)
 	for index := start + 1; index < len(lines); index++ {
 		if isTopLevelKey(lines[index]) {
