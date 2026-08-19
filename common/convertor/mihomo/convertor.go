@@ -31,7 +31,13 @@ func ToOptions(ctx context.Context, content []byte) (outbounds []option.Outbound
 		Proxies []map[string]any `yaml:"proxies"`
 	}
 	if err = yaml.Unmarshal(content, &subscription); err != nil {
-		return nil, nil, E.Cause(err, "parse subscription")
+		if !looksLikeClashSubscription(content) {
+			// 报 YAML 词法错误在这里是帮倒忙：内容压根不是 clash 订阅，行号指向的东西
+			// 毫无意义。多半是机场没认出 User-Agent，给了 base64 订阅或一张登录页。
+			return nil, nil, E.New("not a clash subscription: no proxies section in the response; " +
+				"the airport likely served another format, try setting user_agent")
+		}
+		return nil, nil, E.Cause(err, "parse subscription", excerptAround(content, err.Error()))
 	}
 	if len(subscription.Proxies) == 0 {
 		return nil, nil, E.New("subscription contains no proxies")

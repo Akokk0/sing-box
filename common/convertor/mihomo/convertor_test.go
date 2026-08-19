@@ -2,6 +2,8 @@ package mihomo_test
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/sagernet/sing-box/common/convertor/mihomo"
@@ -169,4 +171,36 @@ proxies:
 	require.Empty(t, outbounds)
 	require.Len(t, skipped, 1)
 	require.Contains(t, skipped[0], "broken")
+}
+
+// 机场按 User-Agent 决定返回什么：认出 clash 就给 clash yaml，认不出就常给 base64 那种
+// 订阅。后者根本不是 YAML，报出来的却是 "yaml: line 47: did not find expected key"——
+// 用户拿着这句话完全无从下手。没有 proxies 段就直说不是 clash 订阅。
+func TestToOptionsSaysSoWhenTheResponseIsNotAClashSubscription(t *testing.T) {
+	ctx := include.Context(context.Background())
+	// base64 订阅：一堆看着像 YAML 又不是 YAML 的行。
+	body := strings.Repeat("dm1lc3M6Ly9leUpoWkdRaU9pSXhMakl1TXk0MElpd2ljRzl5ZENJNk5EUXpmUT09\n", 60)
+	_, _, err := mihomo.ToOptions(ctx, []byte(body))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not a clash subscription",
+		"应当直说拿到的不是 clash 订阅，而不是甩一句 YAML 词法错误")
+}
+
+// 真的是 clash 订阅、只是某一行写坏了时，光给行号不够——用户看不到那一行长什么样。
+// 而且 yaml.v3 报的行号常常指向坏行的**前一行**（缩进写错时它指的是上一行的末尾），
+// 所以要摘一小段窗口。节点密码绝不能跟着进日志。
+func TestToOptionsShowsTheOffendingLinesWithoutLeakingSecrets(t *testing.T) {
+	var body strings.Builder
+	body.WriteString("proxies:\n")
+	for i := 1; i <= 45; i++ {
+		fmt.Fprintf(&body, "  - {name: \"JP %02d\", type: anytls, server: 1.1.1.1, port: 443, password: SUPER-SECRET-VALUE}\n", i)
+	}
+	// 缩进少一格：野生订阅里最常见的坏法，报出来的正是 "did not find expected key"。
+	body.WriteString(" - {name: \"the-broken-one\", type: anytls, server: 1.1.1.1, port: 443, password: SUPER-SECRET-VALUE}\n")
+
+	_, _, err := mihomo.ToOptions(include.Context(context.Background()), []byte(body.String()))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "did not find expected key")
+	require.Contains(t, err.Error(), "the-broken-one", "要把出问题的那几行带出来")
+	require.NotContains(t, err.Error(), "SUPER-SECRET-VALUE", "密码不能进日志")
 }
